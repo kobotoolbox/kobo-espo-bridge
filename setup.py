@@ -167,8 +167,11 @@ def ensure_layouts(espo, t, template_fields):
     ours = bridge_fields(t)
     detail = espo.call('GET', f'/{entity}/layout/detail')
     detail = [p for p in detail if p.get('label') not in (details, kobo)]
-    shown = ([f['espo'] for f in ours if f['espo'] == 'cFollowUpDue']
-             + [f['espo'] for f in template_fields if f.get('type') != 'personName'])
+    # Not again what the page already shows (e.g. fields its own layout has)
+    elsewhere = {c['name'] for p in detail for row in p.get('rows', []) for c in row if c}
+    shown = [n for n in ([f['espo'] for f in ours if f['espo'] == 'cFollowUpDue']
+                         + [f['espo'] for f in template_fields if f.get('type') not in ('personName', 'link')])
+             if n not in elsewhere]
     if shown:
         detail.insert(1, panel(details, shown))
     detail.append(panel(kobo, [f['espo'] for f in ours if f['espo'] != 'cFollowUpDue']))
@@ -177,7 +180,7 @@ def ensure_layouts(espo, t, template_fields):
     columns = rec.get('list_layout') or (CASE_LIST if entity == 'Case' else None)
     if columns:
         espo.call('PUT', f'/{entity}/layout/list',
-                  body=[{'name': n, **({'link': True} if n == 'name' else {})} for n in columns if n in have])
+                  body=[{'name': n, **({'link': True, 'width': 34} if n == 'name' else {})} for n in columns if n in have])
     filters = espo.call('GET', f'/{entity}/layout/filters') or []
     extra = [f['espo'] for f in template_fields if f['type'] in ('enum', 'multiEnum', 'date')]
     espo.call('PUT', f'/{entity}/layout/filters',
