@@ -1,4 +1,4 @@
-# kobo-bridge
+# kobo-espo-bridge
 
 Kobo → EspoCRM, and back. A small service that polls KoboToolbox for new submissions and
 turns each one into an EspoCRM record (a case, a contact, a site...), routed to the right
@@ -9,7 +9,10 @@ one process per template.
 
 Extracted from [kobo-in-a-box](../kobo-in-a-box) `remote/espocrm/` (W11, 2026-11-03), where
 it runs offline on the box, so that the box, [kobo-espo](../kobo-espo) and later connections
-share one tested bridge.
+share one tested bridge. Formerly kobo-bridge (renamed 2026-11-05). Not to be confused with
+kobo-espo, which is one EspoCRM instance using it (its setup, forms, templates and tests).
+The bridge's default EspoCRM API user is still called `kobo-bridge`, so existing setups
+keep their user.
 
 | File | What it is |
 |---|---|

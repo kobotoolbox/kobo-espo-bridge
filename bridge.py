@@ -220,7 +220,7 @@ class Kobo(Api):
         self.call('PATCH', f'/api/v2/assets/{uid}/data/{sub_id}/validation_status/',
                   body={'validation_status.uid': status})
 
-    def replace_media(self, uid, filename, data, description='Open cases (kobo-bridge)'):
+    def replace_media(self, uid, filename, data, description='Open cases (kobo-espo-bridge)'):
         """Put `filename` on the form (replacing an older copy) and redeploy, so phones get it."""
         files = self.call('GET', f'/api/v2/assets/{uid}/files/', {'file_type': 'form_media'})
         for f in files.get('results', []):
@@ -809,7 +809,7 @@ def sync_open_cases(t, kobo, espo, ledger, now, min_seconds):
     data = open_cases_csv(t, espo)
     uploaded = 0
     for uid in kobo.projects(fu['form']):
-        if push_media(kobo, ledger, uid, fu['list'], data, now, min_seconds, 'Open cases (kobo-bridge)'):
+        if push_media(kobo, ledger, uid, fu['list'], data, now, min_seconds, 'Open cases (kobo-espo-bridge)'):
             uploaded += 1
             print(f'{fu["list"]} on {uid}: {data.count(b"\n") - 1} open case(s)')
     return uploaded
@@ -1077,7 +1077,7 @@ def sync_lists(t, kobo, espo, ledger, now, min_seconds, teams):
         for form in spec['forms']:
             for uid in kobo.projects(form):
                 if push_media(kobo, ledger, uid, spec['file'], data, now, min_seconds,
-                              f'{spec["entity"]} from EspoCRM (kobo-bridge)'):
+                              f'{spec["entity"]} from EspoCRM (kobo-espo-bridge)'):
                     uploaded += 1
                     print(f'{spec["file"]} on {uid}: {data.count(b"\n") - 1} row(s)')
     return uploaded
