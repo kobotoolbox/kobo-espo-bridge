@@ -818,7 +818,7 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts):
     # With [record] match it was looked up just now: EspoCRM's own duplicate check (by name)
     # would refuse, say, a second volunteer with the same name
     record = espo.call('POST', f'/{entity}', body=body,
-                       headers={'X-Skip-Duplicate-Check': 'true'} if match else None)
+                       **({'headers': {'X-Skip-Duplicate-Check': 'true'}} if match else {}))
     counts['created'] += 1
     print(f'{entity} {record["id"]} for {uid} submission {sub["_id"]} '
           f'({body.get("priority", "-")}, {len(body["teamsIds"])} team(s))')
