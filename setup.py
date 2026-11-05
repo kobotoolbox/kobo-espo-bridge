@@ -182,7 +182,7 @@ def ensure_layouts(espo, t, template_fields):
         espo.call('PUT', f'/{entity}/layout/list',
                   body=[{'name': n, **({'link': True, 'width': 34} if n == 'name' else {})} for n in columns if n in have])
     filters = espo.call('GET', f'/{entity}/layout/filters') or []
-    extra = [f['espo'] for f in template_fields if f['type'] in ('enum', 'multiEnum', 'date')]
+    extra = [f['espo'] for f in template_fields if f['type'] in ('enum', 'multiEnum', 'date', 'datetime')]
     espo.call('PUT', f'/{entity}/layout/filters',
               body=filters + [n for n in ['cFollowUpDue', *extra] if n in have and n not in filters])
     print(f'layouts: {entity} page, list and filters')
@@ -202,6 +202,9 @@ def bridge_role(t):
             data[e] = {'create': 'yes', 'read': 'all', 'edit': 'all', 'delete': 'no', 'stream': 'no'}
     for spec in t['list']:
         data.setdefault(spec['entity'], {**NONE, 'read': 'all'})
+    for f in t['field']:  # links by lookup: it finds the record to link
+        if f.get('type') == 'link' and f.get('lookup'):
+            data.setdefault(f['entity'], {**NONE, 'read': 'all'})
     # assignmentPermission: setting a record's teams needs it
     return {'data': data, 'fieldData': {}, **NO_PERMISSIONS, 'assignmentPermission': 'all',
             'mentionPermission': 'all' if mentions else 'no'}

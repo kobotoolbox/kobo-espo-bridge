@@ -143,6 +143,8 @@ class Espo:
             rows = self.rows.get(entity, [])
             if params.get('where[0][type]') == 'isNull':
                 rows = [r for r in rows if not r.get('assignedUserId') and r.get('cKoboAsset')]
+            if params.get('where[0][type]') == 'equals':  # a link's lookup
+                rows = [r for r in rows if r.get(params['where[0][attribute]']) == params['where[0][value]']]
             if params.get('where[0][type]') == 'in':
                 wanted = [v for k, v in params.items() if k.startswith('where[0][value]')]
                 rows = [r for r in rows if r.get(params['where[0][attribute]']) in wanted]
@@ -291,10 +293,6 @@ class Lists(unittest.TestCase):
         self.assertEqual([u[1] for u in kobo.uploads], ['sites.csv', 'sites.csv'])
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class Media(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -333,8 +331,96 @@ class Media(unittest.TestCase):
         self.assertIn('Too big to copy (in Kobo): big.jpg', case['description'])
         self.assertEqual(len(kobo.got), 3)  # not the deleted one, not the one no answer names
 
+    def test_a_server_without_media_file_basename_is_matched_by_the_stored_name(self):
+        espo, kobo, counts = Espo(), self.kobo(), {k: 0 for k in ('created', 'existing', 'merged', 'notified', 'skipped')}
+        att = self.att('site_photo_1.jpg')
+        del att['media_file_basename']  # older Kobo: only `filename`, cleaned up
+        s = sub(1, project='a', email='a@b.c', summary='s', photo='site photo (1).jpg', _attachments=[att])
+        bridge.handle({**self.t, 'missing': []}, s, 'http://kf', 'aX', TEAMS, espo, counts, kobo=kobo)
+        self.assertEqual([b['name'] for e, b, _ in espo.posts if e == 'Attachment'], ['site photo (1).jpg'])
+        self.assertEqual(bridge.stored_name("my 'site', photo (1).jpg"), 'my_site_photo_1.jpg')
+
     def test_only_from_this_kobo(self):
         k = bridge.Kobo('https://kf.example.org', 'tok')
         with self.assertRaises(bridge.BridgeError) as e:
             k.download('https://evil.example.com/x.jpg', 100)
         self.assertTrue(e.exception.rejected)
+
+
+SITES = """
+[form]
+name = "Sites"
+
+[record]
+entity = "CSite"
+required = ["code"]
+
+[[route]]
+team = "Pool"
+
+[[field]]
+kobo = "code"
+espo = "siteCode"
+
+[[field]]
+kobo = "standard"
+espo = "standard"
+type = "link"
+entity = "CStandard"
+lookup = "code"
+
+[[field]]
+kobo = "end"
+espo = "registeredAt"
+type = "datetime"
+"""
+
+
+class LinksAndDatetimes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.t = {**bridge.with_form(template(SITES, self.tmp.name), {}), 'missing': []}
+        self.counts = {k: 0 for k in ('created', 'existing', 'merged', 'notified', 'skipped')}
+        self.espo = Espo()
+        self.espo.rows['CStandard'] = [{'id': 'std-1', 'code': 'WASH-1'}, {'id': 'std-2', 'code': 'WASH-2'},
+                                       {'id': 'std-3', 'code': 'TWICE'}, {'id': 'std-4', 'code': 'TWICE'}]
+
+    def handle(self, s):
+        bridge.handle(self.t, s, 'http://kf', 'aX', TEAMS, self.espo, self.counts)
+
+    def test_link_by_lookup(self):
+        self.handle(sub(1, code='S1', standard='WASH-2'))
+        self.assertEqual(self.espo.rows['CSite'][0]['standardId'], 'std-2')
+        self.handle(sub(2, code='S2'))  # unanswered: no link
+        self.assertNotIn('standardId', self.espo.rows['CSite'][1])
+
+    def test_no_record_or_several_is_recorded_not_guessed_and_nothing_written(self):
+        for n, answer, found in ((1, 'NOPE', 0), (2, 'TWICE', 2)):
+            with self.assertRaises(bridge.BridgeError) as e:
+                self.handle(sub(n, code=f'S{n}', standard=answer))
+            self.assertTrue(e.exception.rejected)
+            self.assertEqual(str(e.exception), f'standard: {found} CStandard records with that code')
+        self.assertNotIn('CSite', self.espo.rows)
+
+    def test_datetime_in_utc(self):
+        body = bridge.to_record(self.t, sub(1, code='S1', end='2026-04-23T20:21:06.502+05:30'), 'http://kf', 'aX', TEAMS)
+        self.assertEqual(body['registeredAt'], '2026-04-23 14:51:06')
+        body = bridge.to_record(self.t, sub(1, code='S1', end='2026-04-27T10:31:14'), 'http://kf', 'aX', TEAMS)
+        self.assertEqual(body['registeredAt'], '2026-04-27 10:31:14')  # no offset: UTC already
+        with self.assertRaises(bridge.BridgeError) as e:
+            bridge.to_record(self.t, sub(1, code='S1', end='last tuesday'), 'http://kf', 'aX', TEAMS)
+        self.assertEqual((str(e.exception), e.exception.rejected), ('end: not a date and time', True))
+
+    def test_setup_role_reads_the_looked_up_entity_only(self):
+        import setup
+        data = setup.bridge_role(self.t)['data']
+        self.assertEqual(data['CStandard'], {**setup.NONE, 'read': 'all'})
+
+    def test_lookup_needs_link_and_entity(self):
+        with self.assertRaises(ValueError):
+            template(SITES.replace('entity = "CStandard"\n', ''), self.tmp.name)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -73,7 +73,16 @@ Media ([record] media = "attachments", [followup] media = true): the submission'
 (those an answer refers to, in repeat groups too, not deleted) are copied into EspoCRM as
 attachments of the record, or of the follow-up's note, so staff without a Kobo account see
 them. Downloaded with the bridge's token from this Kobo only, up to media_max_mb (10) each;
-a bigger one is named in the description instead.
+a bigger one is named in the description instead. Kobo stores a file under a cleaned-up
+name (`site photo (1).jpg` -> `site_photo_1.jpg`); servers that don't also give its
+media_file_basename (older ones) are matched by that name, and the copy keeps the answer's.
+
+Links by lookup ([[field]] type = "link" with entity and lookup): the record linked is the
+one of `entity` whose `lookup` field has the answer (a standard by its code, a district by
+its pcode); none, or more than one, and the submission is recorded, not guessed. Without
+lookup the answer is the record's id (e.g. picked from a [[list]] of ids). Datetimes
+(type = "datetime": `start`, `end`, datetime questions) are stored in UTC, from Kobo's
+local time with its offset.
 
 Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
 CSV file on Kobo forms, for select_one_from_file, pulldata() or search(). Uploaded when
@@ -87,6 +96,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -281,6 +291,9 @@ def load_template(path):
     t['record'] = t.get('record') or t.get('case') or {}
     t['entity'] = t['record'].get('entity', 'Case')
     t['labels'] = {f['kobo']: f.get('options', {}) for f in t['field'] if f.get('kobo')}
+    for f in t['field']:
+        if f.get('lookup') and not (f.get('type') == 'link' and f.get('entity')):
+            raise ValueError(f'{path}: field {f.get("kobo")}: lookup needs type = "link" and entity')
     return t
 
 
@@ -386,6 +399,15 @@ def matching_routes(t, a):
     return routes
 
 
+def kobo_datetime(value):
+    """Kobo's '2026-04-23T20:21:06.502+05:30' as EspoCRM's UTC '2026-04-23 14:51:06'. No
+    offset: taken as UTC already."""
+    when = datetime.fromisoformat(str(value).strip())
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return when.strftime('%Y-%m-%d %H:%M:%S')
+
+
 def split_name(full):
     """'Amina J. Hassan' -> ('Amina J.', 'Hassan'): EspoCRM's person names have two parts."""
     parts = str(full or '').split()
@@ -448,8 +470,15 @@ def to_record(t, sub, kobo_url, uid, team_ids):
                 body[espo] = int(float(value))
             except ValueError:  # the message would quote the answer: not logged
                 raise BridgeError(f'{q}: not a number', status='template') from None
+        elif kind == 'datetime':
+            try:
+                body[espo] = kobo_datetime(value)
+            except ValueError:
+                raise BridgeError(f'{q}: not a date and time', status='template') from None
         elif kind == 'personName':  # a Contact's (or Lead's) firstName and lastName
             body['firstName'], body['lastName'] = split_name(value)
+        elif kind == 'link' and f.get('lookup'):
+            continue  # looked up in EspoCRM: resolve_links
         elif kind == 'link':  # the answer is a record's id, e.g. picked from a [[list]]
             body[espo + 'Id'] = value
         else:
@@ -458,6 +487,23 @@ def to_record(t, sub, kobo_url, uid, team_ids):
 
 
 to_case = to_record  # its name before records could be other entities
+
+
+def resolve_links(t, sub, espo, body):
+    """[[field]] type = "link" with lookup: link the one record of `entity` whose `lookup`
+    field has the answer. None or several: the submission is recorded (not guessed), and
+    tried again later, when the record may be there."""
+    a = flat(sub)
+    for f in t['field']:
+        if f.get('type') != 'link' or not f.get('lookup') or a.get(f.get('kobo')) in (None, ''):
+            continue
+        found = espo.call('GET', f'/{f["entity"]}', {
+            'where[0][type]': 'equals', 'where[0][attribute]': f['lookup'],
+            'where[0][value]': str(a[f['kobo']]).strip(), 'select': 'id', 'maxSize': 2})['list']
+        if len(found) != 1:
+            raise BridgeError(f'{f["kobo"]}: {len(found)} {f["entity"]} records with that {f["lookup"]}',
+                              status='nomatch')
+        body[f['espo'] + 'Id'] = found[0]['id']
 
 
 def team_ids(t, espo):
@@ -530,13 +576,26 @@ def answer_strings(value, found=None):
     return found
 
 
+def stored_name(name):
+    """The name Kobo stores a file under (Django's get_valid_filename): spaces to
+    underscores, then only letters, digits, '-', '_' and '.'."""
+    return re.sub(r'(?u)[^-\w.]', '', str(name).strip().replace(' ', '_'))
+
+
 def submission_files(sub):
     """The submission's files that an answer still refers to (as kobo2logie does): not
-    deleted, and named by a question's answer, in repeat groups too."""
-    named = answer_strings(sub)
-    return [x for x in sub.get('_attachments') or []
-            if not x.get('is_deleted') and (x.get('media_file_basename')
-                                            or x.get('filename', '').rsplit('/', 1)[-1]) in named]
+    deleted, and named by a question's answer, in repeat groups too. [(attachment, the
+    answer's name for it)]."""
+    named = {}
+    for answer in answer_strings(sub):
+        named.setdefault(answer, answer)
+        named.setdefault(stored_name(answer), answer)
+    files = []
+    for x in sub.get('_attachments') or []:
+        base = x.get('media_file_basename') or x.get('filename', '').rsplit('/', 1)[-1]
+        if not x.get('is_deleted') and base in named:
+            files.append((x, named[base]))
+    return files
 
 
 def copy_media(kobo, espo, sub, related_type, field, max_mb=10):
@@ -545,8 +604,7 @@ def copy_media(kobo, espo, sub, related_type, field, max_mb=10):
     files too big to copy). Raises BridgeError (unreachable: the pass ends and it's tried
     again; nothing half-made, as the record is created after)."""
     ids, skipped = [], []
-    for x in submission_files(sub):
-        name = x.get('media_file_basename') or x['filename'].rsplit('/', 1)[-1]
+    for x, name in submission_files(sub):
         got = kobo.download(x.get('download_url') or x.get('download_large_url'), int(max_mb * 1024 * 1024))
         if got is None:
             skipped.append(name)
@@ -770,6 +828,8 @@ def apply_edit(t, sub, kobo_url, uid, teams, espo, espo_ed, counts):
         raise
     except Exception as e:
         raise BridgeError(f'template: {type(e).__name__}', status='template') from None
+    if body is not None:
+        resolve_links(t, sub, espo, body)
     fields = kobo_fields(t)
     found = espo.call('GET', '/Case', {
         'where[0][type]': 'equals', 'where[0][attribute]': 'cKoboAsset', 'where[0][value]': uid,
@@ -873,6 +933,7 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
     if espo.find(entity, 'cKoboSubmissionUuid', sub['_uuid'], select='id'):
         counts['existing'] += 1
         return
+    resolve_links(t, sub, espo, body)  # before anything is written
     match = t['record'].get('match') or {}
     same = None
     if match:  # e.g. { emailAddress = "email" }: the record that already has this answer

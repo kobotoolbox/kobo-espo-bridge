@@ -23,6 +23,8 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from bridge import stored_name
+
 PREFIX = '/api/v2/assets/'
 
 
@@ -60,7 +62,8 @@ class FakeKobo:
             for i, (name, (data, mime)) in enumerate((files or {}).items(), start=1):
                 aid = f'att{n}x{i}'
                 self.files[aid] = (data, mime)
-                listed.append({'uid': aid, 'filename': f'user/attachments/{uid}/{name}', 'media_file_basename': name,
+                # as Kobo stores it: a cleaned-up name in `filename`, the answer's in media_file_basename
+                listed.append({'uid': aid, 'filename': f'user/attachments/{uid}/{stored_name(name)}', 'media_file_basename': name,
                                'mimetype': mime, 'is_deleted': False, 'question_xpath': '',
                                'download_url': f'{self.url}/api/v2/assets/{uid}/data/{n}/attachments/{aid}/'})
             sub = {'_id': n, '_uuid': str(uuid.uuid4()),

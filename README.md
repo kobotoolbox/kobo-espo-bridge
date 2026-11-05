@@ -89,10 +89,22 @@ escalate = ["lead-a"]
 [[field]]                     # Kobo question -> EspoCRM field
 kobo = "category"
 espo = "cCategory"            # custom fields of EspoCRM's own entities start with "c"
-type = "enum"                 # varchar | text | int | date | enum | multiEnum | personName | link;
+type = "enum"                 # varchar | text | int | date | datetime | enum | multiEnum | personName | link;
                               # left out for select questions (the form says) or existing fields
 label = "Category"
 options = { forms = "Forms and XLSForm" }  # left out: from the deployed form
+
+[[field]]                     # a link: the record whose `lookup` field has the answer
+kobo = "standard"
+espo = "standard"             # the link (made in EspoCRM, not by setup.py)
+type = "link"
+entity = "CStandard"          # setup.py lets the bridge's user read it
+lookup = "code"               # left out: the answer is the record's id (from a [[list]] of ids)
+
+[[field]]
+kobo = "end"                  # start, end, datetime questions
+espo = "registeredAt"
+type = "datetime"             # stored in UTC, from Kobo's local time and offset
 
 [[list]]                      # EspoCRM records as a CSV on Kobo forms (select_one_from_file, pulldata)
 file = "sites.csv"
@@ -116,7 +128,21 @@ media = true                  # the visit's photos, on its note
 not deleted ones) are downloaded with the bridge's token, from its own Kobo only (the
 URL's host is checked, so a submission can't make it fetch elsewhere), and attached to the
 record before it's created. Staff then see them without a Kobo account, with the record's
-access rules. As in kobo2logie (`src/lib/kobo.ts`, `attachmentsToForward`).
+access rules. As in kobo2logie (`src/lib/kobo.ts`, `attachmentsToForward`). Kobo stores a
+file under a cleaned-up name (`site photo (1).jpg` as `site_photo_1.jpg`) and current
+servers also give the answer's (`media_file_basename`); for older ones that don't, the
+answer is matched by the cleaned-up name. The copy keeps the answer's name.
+
+**Links by lookup.** A `link` field with `lookup` links the one record of `entity` whose
+`lookup` field equals the answer: a standard by its code, a district by its pcode. If
+there's none, or more than one, the submission is recorded with the count (never a guess)
+and tried again on the usual backoff, so a record made later in EspoCRM still gets it.
+Looked up before anything is written. (As kobo-connect's `Entity.link.field` headers do,
+rodekruis/kobo-connect; its other EspoCRM features the bridge had already.)
+
+**Datetimes.** Kobo sends `2026-04-23T20:21:06.502+05:30` (the phone's local time and
+offset); `datetime` fields store it as EspoCRM's UTC `2026-04-23 14:51:06`. Without an
+offset it's taken as UTC. Something else is recorded as `not a date and time`.
 
 kobo-in-a-box's template also has `[espo]` (offline, application name), `[[role]]`,
 `[[api_user]]` and `[demo]`, for its staff roles, its assistant and demo users.
@@ -143,10 +169,11 @@ is a redeploy of the form), `ESPO_LANGUAGE`.
 
 ## Tested
 
-- **Unit tests:** 47 (the box's 35, and 12 for records other than cases, requesters,
-  matching, one team, mentions, escalation, lists and media).
-- **End to end** against EspoCRM 10.0.11 with the fake Kobo: kobo-espo's
-  `tests/cases/connection.py`, 65 checks (see its REPORT.md).
+- **Unit tests:** 53 (the box's 35, and 18 for records other than cases, requesters,
+  matching, one team, mentions, escalation, lists, media and its file names, links by
+  lookup and datetimes).
+- **End to end** against EspoCRM 10.0.11: kobo-espo's `tests/cases/connection.py`, 73
+  checks with the fake Kobo, 72 on kf.kobotoolbox.org (see its REPORT.md).
 - **kobo-in-a-box**'s own e2e (60 checks on the rig) ran against the version imported here,
   not yet against this one: run it before the box switches.
 
