@@ -393,7 +393,7 @@ class FollowupKobo(FakeKobo):
     def form(self, uid, version):
         return kpi_stored(fx.FOLLOWUP_FORM if uid == 'aFollow' else fx.FORM)
 
-    def replace_media(self, uid, filename, data):
+    def replace_media(self, uid, filename, data, description=None):
         self.media[(uid, filename)] = data
         self.deploys += 1
 

@@ -50,6 +50,30 @@ option labels (and select types) are read from the version it has deployed, agai
 that changes (with_form). Options the template writes itself win (for calculated
 questions, which have no choices in the form, or to relabel).
 
+Any entity, not only cases ([record] entity = "Contact", "CSite", ...): a submission opens
+one record. With [record] match (an EspoCRM field = a Kobo question, e.g. the email address
+or a site code) a record that already has it is updated instead, so registering the same
+volunteer or site twice doesn't make a second one. [record] single_team keeps a record in
+one team (the highest-priority matching route), where a submission matching several
+routes would otherwise go to all of them.
+
+[requester] links each record to the person who sent it: the Contact with that email
+(created if there's none) and the Account named by the organisation answer (created
+unless create_account = false). Both get the record's teams. Required answers
+([record] required) are checked before anything is written, so a submission missing one
+leaves no Contact or Account behind.
+
+Notifications, with core EspoCRM only (its workflows are the paid Advanced Pack): a route's
+`notify` users are @mentioned in a note on each new record (EspoCRM then notifies them, in
+the app and by email if SMTP is set up), and with [escalation] its `escalate` users are
+mentioned when a record is still unassigned after_hours later. Mentions need the bridge's
+role to have mentionPermission (setup sets it) and reach only users who can read the record.
+
+Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
+CSV file on Kobo forms, for select_one_from_file, pulldata() or search(). Uploaded when
+it changed, at most every BRIDGE_LIST_MIN_SECONDS; only the listed columns, since the
+whole file goes to every phone with the form. A template can have only lists, no [form].
+
 status.json (for the box's status page) and the logs carry ids, counts and HTTP reasons,
 never answers.
 """
@@ -67,7 +91,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Fields the bridge itself fills on every case, whatever the template
+# Fields the bridge itself fills on every record, whatever the template
 BRIDGE_FIELDS = [
     {'espo': 'cKoboAsset', 'type': 'varchar', 'label': 'Kobo project'},
     {'espo': 'cKoboSubmissionId', 'type': 'int', 'label': 'Kobo submission'},
@@ -75,6 +99,7 @@ BRIDGE_FIELDS = [
     {'espo': 'cKoboLink', 'type': 'url', 'label': 'Open in Kobo'},
     {'espo': 'cFollowUpDue', 'type': 'datetime', 'label': 'Follow up by'},
 ]
+FOLLOW_UP_DUE = 'cFollowUpDue'
 PRIORITIES = ['Low', 'Normal', 'High', 'Urgent']
 PAGE = 100
 BACKOFF = [60, 600, 3600, 6 * 3600]  # seconds before retry 1, 2, 3, then every 6 h
@@ -103,13 +128,13 @@ class Api:
     def __init__(self, base, headers, timeout=60):
         self.base, self.headers, self.timeout = base.rstrip('/'), headers, timeout
 
-    def call(self, method, path, params=None, body=None):
+    def call(self, method, path, params=None, body=None, headers=None):
         url = (path if path.startswith('http') else self.base + path) + (
             '?' + urllib.parse.urlencode(params) if params else '')
         req = urllib.request.Request(
             url, method=method, data=None if body is None else json.dumps(body).encode(),
             headers={**self.headers, 'Accept': 'application/json',
-                     'Content-Type': 'application/json'})
+                     'Content-Type': 'application/json', **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 text = r.read().decode()
@@ -179,14 +204,14 @@ class Kobo(Api):
         self.call('PATCH', f'/api/v2/assets/{uid}/data/{sub_id}/validation_status/',
                   body={'validation_status.uid': status})
 
-    def replace_media(self, uid, filename, data):
+    def replace_media(self, uid, filename, data, description='Open cases (kobo-bridge)'):
         """Put `filename` on the form (replacing an older copy) and redeploy, so phones get it."""
         files = self.call('GET', f'/api/v2/assets/{uid}/files/', {'file_type': 'form_media'})
         for f in files.get('results', []):
             if (f.get('metadata') or {}).get('filename') == filename:
                 self.call('DELETE', f'/api/v2/assets/{uid}/files/{f["uid"]}/')
         boundary = 'kobo-box-' + hashlib.sha256(data).hexdigest()[:16]
-        parts = [('file_type', 'form_media'), ('description', 'Open cases (kobo-in-a-box bridge)'),
+        parts = [('file_type', 'form_media'), ('description', description),
                  ('metadata', json.dumps({'filename': filename}))]
         body = b''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
                         for k, v in parts)
@@ -224,8 +249,24 @@ def load_template(path):
     t = tomllib.loads(raw.decode())
     t['hash'] = hashlib.sha256(raw).hexdigest()[:16]  # a change retries every failure
     t.setdefault('route', [])
+    t.setdefault('field', [])
+    t.setdefault('list', [])
+    # [record] (any entity); [case], its older name, still works
+    t['record'] = t.get('record') or t.get('case') or {}
+    t['entity'] = t['record'].get('entity', 'Case')
     t['labels'] = {f['kobo']: f.get('options', {}) for f in t['field'] if f.get('kobo')}
     return t
+
+
+def bridge_fields(t):
+    """The fields the bridge fills on the template's entity: "Follow up by" only when a
+    route sets follow_up_hours."""
+    due = any('follow_up_hours' in r for r in t['route'])
+    return [f for f in BRIDGE_FIELDS if f['espo'] != FOLLOW_UP_DUE or due]
+
+
+def route_teams(t):
+    return sorted({r['team'] for r in t['route'] if r.get('team')})
 
 
 def first_label(label, default):
@@ -277,8 +318,11 @@ def with_form(t, choices):
             if f.get('espo'):
                 f.setdefault('type', 'multiEnum' if kind == 'select_multiple' else 'enum')
         fields.append(f)
+    # Labels for every select question in the form (e.g. [requester] organisation names the
+    # Account by its label), the template's own winning
     return {**t, 'field': fields,
-            'labels': {f['kobo']: f.get('options', {}) for f in fields if f.get('kobo')}}
+            'labels': {**{q: opts for q, (_, opts) in choices.items()},
+                       **{f['kobo']: f.get('options', {}) for f in fields if f.get('kobo')}}}
 
 
 def flat(sub):
@@ -302,62 +346,155 @@ def label(t, question, value):
     return ', '.join(opts.get(a, a) for a in answers(value))
 
 
-def to_case(t, sub, kobo_url, uid, team_ids):
-    """The case body for a submission, or None if the template says it needs no case."""
+def priority(route):
+    return route.get('priority', 'Normal')
+
+
+def matching_routes(t, a):
+    """The routes a submission's answers match; with [record] single_team only the first
+    of the highest priority, so the record has one team."""
+    routes = [r for r in t['route'] if all(matches(a.get(q), v) for q, v in r.get('match', {}).items())]
+    if t['record'].get('single_team') and routes:
+        top = max(routes, key=lambda r: PRIORITIES.index(priority(r)))
+        routes = [next(r for r in routes if priority(r) == priority(top))]
+    return routes
+
+
+def split_name(full):
+    """'Amina J. Hassan' -> ('Amina J.', 'Hassan'): EspoCRM's person names have two parts."""
+    parts = str(full or '').split()
+    return (' '.join(parts[:-1]), parts[-1]) if len(parts) > 1 else ('', parts[0] if parts else '')
+
+
+def to_record(t, sub, kobo_url, uid, team_ids):
+    """The record body for a submission, or None if the template says it needs none."""
     a = flat(sub)
-    if not all(matches(a.get(q), v) for q, v in t['form'].get('when', {}).items()):
+    if not all(matches(a.get(q), v) for q, v in t.get('form', {}).get('when', {}).items()):
         return None
-    routes = [r for r in t['route'] if all(matches(a.get(q), v) for q, v in r['match'].items())]
+    rec, is_case = t['record'], t['entity'] == 'Case'
+    gaps = [q for q in rec.get('required', []) if a.get(q) in (None, '')]
+    if gaps:  # before anything is written: no Contact or Account for a submission that can't be a record
+        raise BridgeError(f'required answer missing: {", ".join(gaps)}', status='template')
+    routes = matching_routes(t, a)
 
     class Labels(dict):
         def __missing__(self, q):
             return label(t, q, a.get(q))
 
-    missing = sorted({r['team'] for r in routes} - set(team_ids))
+    missing = sorted({r['team'] for r in routes if r.get('team')} - set(team_ids))
     if missing:
-        raise BridgeError(f'team {", ".join(missing)} not in EspoCRM: run espocrm.sh setup',
-                          status='template')
-    lines = [f'{title}: {label(t, q, a.get(q))}' for title, q in t['case'].get('details', [])
-             if a.get(q) not in (None, '')]
+        raise BridgeError(f'team {", ".join(missing)} not in EspoCRM: run setup', status='template')
+    lines = [f'{title}: {label(t, q, a.get(q))}' if title else label(t, q, a.get(q))
+             for title, q in rec.get('details', []) if a.get(q) not in (None, '')]
     body = {
-        'name': t['case']['name'].format_map(Labels())[:255],
-        'status': 'New',
-        'priority': max((r['priority'] for r in routes), key=PRIORITIES.index, default='Normal'),
-        'description': '\n'.join(lines),
-        'teamsIds': sorted({team_ids[r['team']] for r in routes}),
+        'teamsIds': sorted({team_ids[r['team']] for r in routes if r.get('team')}),
         'cKoboAsset': uid,
         'cKoboSubmissionId': sub['_id'],
         'cKoboSubmissionUuid': sub['_uuid'],
         'cKoboLink': f'{kobo_url.rstrip("/")}/#/forms/{uid}/data/table',
     }
+    if rec.get('name'):
+        body['name'] = rec['name'].format_map(Labels())[:255]
+    if lines or is_case:
+        body['description'] = '\n'.join(lines)
+    if 'status' in rec or is_case:
+        body['status'] = rec.get('status', 'New')
+    if is_case:
+        body['priority'] = max((priority(r) for r in routes), key=PRIORITIES.index, default='Normal')
+    body.update(rec.get('set') or {})  # constants, e.g. { cSource = "Kobo form" }
+    if rec.get('attachments') and sub.get('_attachments'):
+        # Links, not copies: they open in Kobo, for people with access to the project there
+        files = [f'- {x.get("media_file_basename") or x.get("filename", "").rsplit("/", 1)[-1]}: '
+                 f'{x.get("download_url") or x.get("download_large_url", "")}' for x in sub['_attachments']]
+        body['description'] = '\n'.join(filter(None, [body.get('description'), 'Attachments (in Kobo):', *files]))
     hours = [r['follow_up_hours'] for r in routes if 'follow_up_hours' in r]
     if hours:
         submitted = datetime.fromisoformat(sub['_submission_time']).replace(tzinfo=timezone.utc)
-        body['cFollowUpDue'] = (submitted + timedelta(hours=min(hours))).strftime('%Y-%m-%d %H:%M:%S')
+        body[FOLLOW_UP_DUE] = (submitted + timedelta(hours=min(hours))).strftime('%Y-%m-%d %H:%M:%S')
     for f in t['field']:
         q, espo = f.get('kobo'), f.get('espo')
         value = a.get(q) if q else None
         if not espo or value in (None, ''):
             continue
-        if f['type'] == 'int':
+        kind = f.get('type')  # none: a text field, or one EspoCRM has already
+        if kind == 'int':
             try:
                 body[espo] = int(float(value))
             except ValueError:  # the message would quote the answer: not logged
                 raise BridgeError(f'{q}: not a number', status='template') from None
+        elif kind == 'personName':  # a Contact's (or Lead's) firstName and lastName
+            body['firstName'], body['lastName'] = split_name(value)
+        elif kind == 'link':  # the answer is a record's id, e.g. picked from a [[list]]
+            body[espo + 'Id'] = value
         else:
-            body[espo] = answers(value) if f['type'] == 'multiEnum' else value
+            body[espo] = answers(value) if kind == 'multiEnum' else value
     return body
+
+
+to_case = to_record  # its name before records could be other entities
 
 
 def team_ids(t, espo):
     """{team name: id} for the template's teams that exist in EspoCRM. A missing one only
-    fails the submissions routed to it (to_case)."""
+    fails the submissions routed to it (to_record), or the list that's filtered by it."""
     ids = {}
-    for name in sorted({r['team'] for r in t['route']}):
+    for name in sorted(set(route_teams(t)) | {x['team'] for x in t['list'] if x.get('team')}):
         team = espo.find('Team', 'name', name, select='id')
         if team is not None:
             ids[name] = team['id']
     return ids
+
+
+def add_teams(espo, entity, row, teams):
+    """Give an existing Contact or Account the record's teams too (never takes any away)."""
+    have = set(row.get('teamsIds') or [])
+    if set(teams) - have:
+        espo.call('PUT', f'/{entity}/{row["id"]}', body={'teamsIds': sorted(have | set(teams))})
+
+
+def link_requester(t, sub, espo, body):
+    """[requester]: body gets contactId and accountId, for the Contact with the submission's
+    email and the Account its organisation answer names, made if missing (no duplicates:
+    looked up first, so a retry finds the ones made the first time)."""
+    req = t.get('requester')
+    if not req:
+        return
+    a, teams = flat(sub), body.get('teamsIds') or []
+    account = None
+    org_q = req.get('organisation')
+    org = label(t, org_q, a.get(org_q)).strip() if org_q and a.get(org_q) not in (None, '') else ''
+    if org:
+        account = espo.find('Account', 'name', org, select='id,teamsIds')
+        if account is None and req.get('create_account', True):
+            account = espo.call('POST', '/Account', body={'name': org[:255], 'teamsIds': teams})  # looked up by name just now
+            print(f'account {account["id"]} for submission {sub["_id"]}')
+        elif account is not None:
+            add_teams(espo, 'Account', account, teams)
+    email = str(a.get(req.get('email', '')) or '').strip().lower()
+    if email:
+        contact = espo.find('Contact', 'emailAddress', email, select='id,teamsIds,accountId')
+        if contact is None:
+            first, last = split_name(a.get(req.get('name', '')))
+            # Matched by email just now; EspoCRM's own duplicate check goes by name, and
+            # would refuse a second person with the same name (409)
+            contact = espo.call('POST', '/Contact', body={
+                'firstName': first, 'lastName': last or email.split('@')[0], 'emailAddress': email,
+                'accountId': account['id'] if account else None, 'teamsIds': teams},
+                headers={'X-Skip-Duplicate-Check': 'true'})
+            print(f'contact {contact["id"]} for submission {sub["_id"]}')
+        else:
+            add_teams(espo, 'Contact', contact, teams)
+        body[req.get('contact_link', 'contact') + 'Id'] = contact['id']
+    if account:
+        body[req.get('account_link', 'account') + 'Id'] = account['id']
+
+
+def mention(t, espo, entity, record_id, users, message):
+    """A note on the record @mentioning users: EspoCRM notifies each one who can read it."""
+    users = sorted(set(users))
+    if users:
+        espo.call('POST', '/Note', body={'type': 'Post', 'parentType': entity, 'parentId': record_id,
+                                         'post': f'{message} ' + ' '.join(f'@{u}' for u in users)})
 
 
 class Ledger:
@@ -447,16 +584,28 @@ def case_number(t, sub):
 
 
 def followup(t, sub, espo, espo_fu, uid, labels, counts):
-    """Apply a follow-up visit to its case. Raises BridgeError."""
+    """Apply a follow-up visit to its record: the case numbered by the key question
+    (cs_<number>), or with [followup] match the record of the template's entity whose
+    `match` field has the key's answer (e.g. a site code picked from sites.csv). Raises
+    BridgeError."""
     fu = t['followup']
-    n = case_number(t, sub)
-    found = espo.call('GET', '/Case', {'where[0][type]': 'equals', 'where[0][attribute]': 'number',
-                                       'where[0][value]': n, 'select': 'id,status', 'maxSize': 2})['list']
+    entity = t['entity']
+    if fu.get('match'):
+        n = str(flat(sub).get(fu['key']) or '')
+        if not n:
+            raise BridgeError(f'{fu["key"]}: no record chosen', status='nomatch')
+        where, what = (fu['match'], n), f'{entity} records with {fu["match"]} {n}'
+    else:
+        n = case_number(t, sub)
+        where, what = ('number', n), f'cases numbered CS-{n}'
+    found = espo.call('GET', f'/{entity}', {'where[0][type]': 'equals', 'where[0][attribute]': where[0],
+                                            'where[0][value]': where[1], 'select': 'id,status',
+                                            'maxSize': 2})['list']
     if len(found) != 1:  # never a guess
-        raise BridgeError(f'{len(found)} cases numbered CS-{n}', status='nomatch')
+        raise BridgeError(f'{len(found)} {what}', status='nomatch')
     case = found[0]
     marker = f'(Kobo follow-up {sub["_uuid"]})'
-    stream = espo_fu.call('GET', f'/Case/{case["id"]}/stream', {'maxSize': 200}).get('list', [])
+    stream = espo_fu.call('GET', f'/{entity}/{case["id"]}/stream', {'maxSize': 200}).get('list', [])
     if any(marker in (note.get('post') or '') for note in stream):
         counts['existing'] += 1
         return
@@ -467,21 +616,22 @@ def followup(t, sub, espo, espo_fu, uid, labels, counts):
         return ', '.join(opts.get(x, x) for x in answers(a.get(q))) if opts else str(a.get(q))
 
     lines = [f'{title}: {lab(q)}' for title, q in fu.get('note', []) if a.get(q) not in (None, '')]
-    closed = case['status'] in CLOSED
+    closed = case.get('status') in CLOSED
     if not closed:
         body = {espo_field: a[q] for q, espo_field in fu.get('fields', {}).items() if a.get(q) not in (None, '')}
         status = fu.get('status', {})
         if status and a.get(status['question']) in status['map']:
             body['status'] = status['map'][a[status['question']]]
         if body:
-            espo_fu.call('PUT', f'/Case/{case["id"]}', body=body)
+            espo_fu.call('PUT', f'/{entity}/{case["id"]}', body=body)
     else:
         lines.append(f'(The case was already {case["status"].lower()}: not changed.)')
     # Last: the note is what marks this follow-up as applied
-    espo_fu.call('POST', '/Note', body={'type': 'Post', 'parentType': 'Case', 'parentId': case['id'],
-                                        'post': 'Follow-up visit\n' + '\n'.join(lines) + '\n' + marker})
+    espo_fu.call('POST', '/Note', body={'type': 'Post', 'parentType': entity, 'parentId': case['id'],
+                                        'post': fu.get('title', 'Follow-up visit') + '\n'
+                                        + '\n'.join(lines) + '\n' + marker})
     counts['closed_note' if closed else 'updated'] += 1
-    print(f'follow-up {sub["_id"]} of {uid} -> case CS-{n}' + (' (closed: note only)' if closed else ''))
+    print(f'follow-up {sub["_id"]} of {uid} -> {entity} {n}' + (' (closed: note only)' if closed else ''))
 
 
 def open_cases_csv(t, espo):
@@ -522,17 +672,11 @@ def sync_open_cases(t, kobo, espo, ledger, now, min_seconds):
     if not fu:
         return 0
     data = open_cases_csv(t, espo)
-    digest = hashlib.sha256(data).hexdigest()[:16]
     uploaded = 0
     for uid in kobo.projects(fu['form']):
-        last = ledger.seen_value(f'list:{uid}')
-        last_hash, last_time = (last.split('@') + ['0'])[:2] if last else ('', '0')
-        if last_hash == digest or now - float(last_time) < min_seconds:
-            continue
-        kobo.replace_media(uid, fu['list'], data)
-        ledger.set_seen(f'list:{uid}', f'{digest}@{now}')
-        uploaded += 1
-        print(f'{fu["list"]} on {uid}: {data.count(b"\n") - 1} open case(s)')
+        if push_media(kobo, ledger, uid, fu['list'], data, now, min_seconds, 'Open cases (kobo-bridge)'):
+            uploaded += 1
+            print(f'{fu["list"]} on {uid}: {data.count(b"\n") - 1} open case(s)')
     return uploaded
 
 
@@ -604,7 +748,7 @@ def push_status(t, espo, kobo, ledger):
     if not mapping:
         return 0
     since = ledger.seen_value('status_since') or '1970-01-01 00:00:00'
-    page = espo.call('GET', '/Case', {
+    page = espo.call('GET', f'/{t["entity"]}', {
         'where[0][type]': 'greaterThanOrEquals', 'where[0][attribute]': 'modifiedAt',
         'where[0][value]': since, 'select': 'status,cKoboAsset,cKoboSubmissionId,modifiedAt',
         'orderBy': 'modifiedAt', 'order': 'asc', 'maxSize': 200})
@@ -627,32 +771,168 @@ def push_status(t, espo, kobo, ledger):
 
 
 def missing_fields(t, espo):
-    """The template's Case fields EspoCRM doesn't have (yet). EspoCRM drops values for
-    unknown fields without an error, so no case is opened until setup has made them."""
-    have = espo.call('GET', '/Metadata', {'key': 'entityDefs.Case.fields'}) or {}
-    return sorted(f['espo'] for f in BRIDGE_FIELDS + t['field'] if f.get('espo') and f['espo'] not in have)
+    """The template's fields EspoCRM doesn't have (yet) on its entity. EspoCRM drops values
+    for unknown fields without an error, so no record is opened until setup has made them."""
+    have = espo.call('GET', '/Metadata', {'key': f'entityDefs.{t["entity"]}.fields'}) or {}
+    return sorted(f['espo'] for f in bridge_fields(t) + t['field'] if f.get('espo') and f['espo'] not in have)
 
 
 def handle(t, sub, kobo_url, uid, teams, espo, counts):
-    """Open the submission's case if it needs one. Raises BridgeError."""
+    """Open the submission's record if it needs one, or update the one it matches. Raises
+    BridgeError."""
+    entity = t['entity']
     try:
-        body = to_case(t, sub, kobo_url, uid, teams)
+        body = to_record(t, sub, kobo_url, uid, teams)
     except BridgeError:
         raise
     except Exception as e:  # a template that doesn't fit the form: this submission only
         raise BridgeError(f'template: {type(e).__name__}', status='template') from None
     if body is None:
         counts['skipped'] += 1
-    elif t.get('missing'):
-        raise BridgeError(f'fields not in EspoCRM yet ({", ".join(t["missing"])}): espocrm.sh setup '
+        return
+    if t.get('missing'):
+        raise BridgeError(f'fields not in EspoCRM yet ({", ".join(t["missing"])}): run setup '
                           '(box.sh runs it every 10 min)', status='template')
-    elif espo.find('Case', 'cKoboSubmissionUuid', sub['_uuid'], select='id'):
+    if espo.find(entity, 'cKoboSubmissionUuid', sub['_uuid'], select='id'):
         counts['existing'] += 1
-    else:
-        case = espo.call('POST', '/Case', body=body)
-        counts['created'] += 1
-        print(f'case {case["id"]} for {uid} submission {sub["_id"]} '
-              f'({body["priority"]}, {len(body["teamsIds"])} team(s))')
+        return
+    match = t['record'].get('match') or {}
+    same = None
+    if match:  # e.g. { emailAddress = "email" }: the record that already has this answer
+        attr, q = next(iter(match.items()))
+        value = flat(sub).get(q)
+        if value not in (None, ''):
+            same = espo.find(entity, attr, str(value).strip().lower() if attr == 'emailAddress'
+                             else value, select='id,teamsIds')
+    if same is not None:
+        update = {k: v for k, v in body.items() if k not in ('teamsIds', 'status')}
+        update['teamsIds'] = sorted(set(same.get('teamsIds') or []) | set(body['teamsIds']))
+        espo.call('PUT', f'/{entity}/{same["id"]}', body=update)
+        espo.call('POST', '/Note', body={
+            'type': 'Post', 'parentType': entity, 'parentId': same['id'],
+            'post': f'Updated from Kobo submission {sub["_id"]} (it matched on {attr}).'})
+        counts['merged'] += 1
+        print(f'{entity} {same["id"]} updated by {uid} submission {sub["_id"]} (same {attr})')
+        return
+    link_requester(t, sub, espo, body)
+    # With [record] match it was looked up just now: EspoCRM's own duplicate check (by name)
+    # would refuse, say, a second volunteer with the same name
+    record = espo.call('POST', f'/{entity}', body=body,
+                       headers={'X-Skip-Duplicate-Check': 'true'} if match else None)
+    counts['created'] += 1
+    print(f'{entity} {record["id"]} for {uid} submission {sub["_id"]} '
+          f'({body.get("priority", "-")}, {len(body["teamsIds"])} team(s))')
+    users = [u for r in matching_routes(t, flat(sub)) for u in r.get('notify', [])]
+    if users:
+        mention(t, espo, entity, record['id'], users,
+                t['record'].get('notify_message', 'New from Kobo, please look at it:'))
+        counts['notified'] += 1
+
+
+def escalate(t, espo, ledger, now):
+    """[escalation]: records from Kobo still unassigned after_hours after they came in get
+    a note @mentioning their routes' `escalate` users, once."""
+    esc = t.get('escalation')
+    if not esc:
+        return 0
+    by_team = {}
+    for r in t['route']:
+        by_team.setdefault(r.get('team'), set()).update(r.get('escalate', []))
+    names = {v: k for k, v in team_ids(t, espo).items()}
+    before = datetime.fromtimestamp(now - float(esc['after_hours']) * 3600, timezone.utc)
+    page = espo.call('GET', f'/{t["entity"]}', {
+        'where[0][type]': 'isNull', 'where[0][attribute]': 'assignedUserId',
+        'where[1][type]': 'isNotNull', 'where[1][attribute]': 'cKoboAsset',
+        'where[2][type]': 'before', 'where[2][attribute]': 'createdAt',
+        'where[2][value]': before.strftime('%Y-%m-%d %H:%M:%S'),
+        'select': 'id,teamsIds,status', 'orderBy': 'createdAt', 'order': 'asc', 'maxSize': 200})
+    done = 0
+    for row in page['list']:
+        key = f'esc:{row["id"]}'
+        if ledger.seen_value(key) or row.get('status') in CLOSED:
+            continue
+        users = set().union(*(by_team.get(names.get(i), set()) for i in row.get('teamsIds') or []), set())
+        mention(t, espo, t['entity'], row['id'], users, esc.get(
+            'message', f'Still unassigned {esc["after_hours"]} h after it came in from Kobo:'))
+        ledger.set_seen(key, str(now))
+        done += 1
+        print(f'{t["entity"]} {row["id"]}: unassigned, escalated to {len(users)} user(s)')
+    return done
+
+
+def list_rows(spec, espo, team_ids):
+    """The records a [[list]] holds: its entity, filtered by `where` (field = value or
+    [values]) and `team` (records in that team), every page."""
+    params, i = {}, 0
+    for attr, value in (spec.get('where') or {}).items():
+        if isinstance(value, list):
+            params.update({f'where[{i}][type]': 'in', f'where[{i}][attribute]': attr,
+                           **{f'where[{i}][value][{j}]': v for j, v in enumerate(value)}})
+        else:
+            params.update({f'where[{i}][type]': 'equals', f'where[{i}][attribute]': attr,
+                           f'where[{i}][value]': value})
+        i += 1
+    if spec.get('team'):
+        if spec['team'] not in team_ids:
+            raise BridgeError(f'list {spec["file"]}: team {spec["team"]} not in EspoCRM', status='template')
+        params.update({f'where[{i}][type]': 'linkedWith', f'where[{i}][attribute]': 'teams',
+                       f'where[{i}][value][0]': team_ids[spec['team']]})
+    rows, offset = [], 0
+    while True:
+        page = espo.call('GET', f'/{spec["entity"]}', {
+            **params, 'orderBy': spec.get('order_by', 'name'), 'order': 'asc',
+            'maxSize': 200, 'offset': offset})
+        rows += page['list']
+        offset += len(page['list'])
+        if not page['list'] or offset >= page.get('total', 0):
+            return rows
+
+
+def list_csv(spec, rows):
+    """columns: {CSV column: EspoCRM field, or a "{field} · {field}" pattern}. Lists
+    (multiEnum) are joined with spaces, as Kobo's select_multiple answers are."""
+    def value(row, src):
+        if '{' in src:
+            return src.format_map(type('Row', (dict,), {'__missing__': lambda s, k: ''})(
+                {k: value(row, k) for k in row}))
+        v = row.get(src)
+        if isinstance(v, dict):  # teamsNames and the like
+            return ', '.join(v.values())
+        if isinstance(v, list):
+            return ' '.join(str(x) for x in v)
+        return '' if v is None else str(v)
+
+    def cell(v):
+        return '"' + v.replace('"', '""') + '"' if any(ch in v for ch in ',"\n') else v
+    cols = spec['columns']
+    out = [list(cols)] + [[value(r, src) for src in cols.values()] for r in rows]
+    return ''.join(','.join(cell(v) for v in row) + '\n' for row in out).encode()
+
+
+def push_media(kobo, ledger, uid, filename, data, now, min_seconds, description):
+    """Put the file on a form if it changed since the last upload there, at most every
+    min_seconds (each upload is a redeploy and a new form version). True if uploaded."""
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    last = ledger.seen_value(f'list:{uid}:{filename}') or ledger.seen_value(f'list:{uid}')
+    last_hash, last_time = (last.split('@') + ['0'])[:2] if last else ('', '0')
+    if last_hash == digest or now - float(last_time) < min_seconds:
+        return False
+    kobo.replace_media(uid, filename, data, description)
+    ledger.set_seen(f'list:{uid}:{filename}', f'{digest}@{now}')
+    return True
+
+
+def sync_lists(t, kobo, espo, ledger, now, min_seconds, teams):
+    uploaded = 0
+    for spec in t['list']:
+        data = list_csv(spec, list_rows(spec, espo, teams))
+        for form in spec['forms']:
+            for uid in kobo.projects(form):
+                if push_media(kobo, ledger, uid, spec['file'], data, now, min_seconds,
+                              f'{spec["entity"]} from EspoCRM (kobo-bridge)'):
+                    uploaded += 1
+                    print(f'{spec["file"]} on {uid}: {data.count(b"\n") - 1} row(s)')
+    return uploaded
 
 
 def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=None,
@@ -664,7 +944,10 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
     forms = {} if forms is None else forms
     teams = team_ids(t, espo)
     counts = {'seen': 0, 'created': 0, 'skipped': 0, 'existing': 0, 'failed': 0, 'retried': 0,
-              'updated': 0, 'closed_note': 0, 'lists': 0, 'edited': 0, 'statuses': 0}
+              'updated': 0, 'closed_note': 0, 'lists': 0, 'edited': 0, 'statuses': 0,
+              'merged': 0, 'notified': 0, 'escalated': 0}
+    if t['entity'] != 'Case':
+        espo_ed = None  # edits (apply_edit) are for cases only, as yet
     if ledger.retry_all_if_changed('template', t['hash']):
         print('template changed: retrying every failed submission')
 
@@ -684,10 +967,10 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
                 raise
             n = ledger.fail(uid, sub, str(e), now)
             counts['failed'] += 1
-            print(f'submission {sub["_id"]} of {uid} not a case ({n} attempt(s)): {e}')
+            print(f'submission {sub["_id"]} of {uid} not a {t["entity"]} ({n} attempt(s)): {e}')
             return False
 
-    projects = kobo.projects(t['form']['name'])
+    projects = kobo.projects(t['form']['name']) if t.get('form') else {}
     fu_projects = kobo.projects(t['followup']['form']) if t.get('followup') and espo_fu else {}
     # Failures of projects no longer visible (deleted, or not shared with the bridge any
     # more) are kept, in case they come back, but aren't counted as waiting
@@ -750,8 +1033,10 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
                 ledger.advance(uid, sub['_id'])
             if len(subs) < PAGE:
                 break
-    if fu_projects:
+    if fu_projects and t['followup'].get('list'):
         counts['lists'] = sync_open_cases(t, kobo, espo, ledger, now, list_min_seconds)
+    counts['lists'] += sync_lists(t, kobo, espo, ledger, now, list_min_seconds, teams)
+    counts['escalated'] = escalate(t, espo, ledger, now)
     return counts
 
 
@@ -811,7 +1096,7 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(state_dir / 'bridge.sqlite')
     poll = int(env.get('BRIDGE_POLL_SECONDS', '30'))
-    print(f'bridge: "{t["form"]["name"]}" from {kobo_url} every {poll}s')
+    print(f'bridge: "{t.get("form", {}).get("name", "lists only")}" ({t["entity"]}) from {kobo_url} every {poll}s')
     last_success, forms = None, {}
     while True:
         now, counts, error = time.time(), {}, None
@@ -824,7 +1109,8 @@ def main():
                 print('template reloaded')
             counts = sync_once(t, kobo, espo, kobo_url, ledger, now, forms, espo_fu, list_min, espo_ed)
             last_success = now
-            if any(counts[k] for k in ('seen', 'failed', 'retried', 'lists', 'edited', 'statuses')) or cmd == 'once':
+            if any(counts[k] for k in ('seen', 'failed', 'retried', 'lists', 'edited', 'statuses',
+                                       'escalated')) or cmd == 'once':
                 print('pass:', ', '.join(f'{k} {v}' for k, v in counts.items()))
         except BridgeError as e:
             error = str(e)
