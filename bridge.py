@@ -852,8 +852,10 @@ def escalate(t, espo, ledger, now):
         if ledger.seen_value(key) or row.get('status') in CLOSED:
             continue
         users = set().union(*(by_team.get(names.get(i), set()) for i in row.get('teamsIds') or []), set())
+        hours = float(esc['after_hours'])
+        wait = f'{round(hours * 60)} minutes' if hours < 1 else f'{hours:g} hours'
         mention(t, espo, t['entity'], row['id'], users, esc.get(
-            'message', f'Still unassigned {esc["after_hours"]} h after it came in from Kobo:'))
+            'message', f'Still unassigned {wait} after it came in from Kobo:'))
         ledger.set_seen(key, str(now))
         done += 1
         print(f'{t["entity"]} {row["id"]}: unassigned, escalated to {len(users)} user(s)')
