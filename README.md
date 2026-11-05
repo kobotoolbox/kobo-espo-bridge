@@ -125,7 +125,7 @@ python3 -I setup.py --template my.toml --url https://espo.example.org --secrets 
 # The bridge (in Docker: python:3.13-slim, this directory mounted read-only)
 ESPO_URL=https://espo.example.org ESPO_API_KEY=... KOBO_URL=https://kf.example.org \
 KOBO_TOKEN_FILE=/root/kobo.token BRIDGE_TEMPLATE=my.toml BRIDGE_STATE_DIR=/var/lib/bridge \
-    python3 -I bridge.py run
+    python3 -I -u bridge.py run    # -u: logs as they happen (-I ignores PYTHONUNBUFFERED)
 ```
 
 Optional: `ESPO_FOLLOWUP_API_KEY` (follow-ups), `ESPO_EDITS_API_KEY` (edited submissions,
