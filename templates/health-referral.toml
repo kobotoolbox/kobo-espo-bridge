@@ -1,0 +1,224 @@
+# Community health referrals (test scenario, made-up data).
+#
+# Community health workers (CHWs) visit households in four zones of a displacement camp.
+# They screen children under five for the WHO/iCCM general danger signs and for acute
+# malnutrition (MUAC), ask about diarrhoea and dehydration, and check pregnant women for
+# danger signs. The Kobo form works out whether a referral is needed and why. Every visit
+# that needs one becomes a case in EspoCRM, sent to the team that follows it up:
+#
+#   Referral coordinators  danger signs (child or pregnancy), bloody or persistent diarrhoea: was the person
+#                          seen at the health post or hospital, and what happened?
+#   Nutrition (OTP)        severe/moderate acute malnutrition: enrolled in OTP or TSFP?
+#   Surveillance           suspected cholera: an alert the surveillance officer verifies
+#                          within hours, and a case to follow
+#
+# A visit can match several routes (suspected cholera in a child with SAM): the case goes
+# to every matching team, with the highest priority and the earliest follow-up.
+# The caregiver's phone is only collected when they agree to be called back.
+#
+# Used by espocrm-setup.py (teams, fields, layout) and bridge.py (Kobo → case).
+
+[form]
+# The Kobo project, matched by name (every deployed project with this name is polled)
+name = "Community health referral"
+# Only these submissions become cases
+when = { referral_needed = "yes" }
+
+[case]
+# {question} is the answer's label from [[field]] below; multiple answers are joined by ", "
+name = "{referral_reasons}: {patient_type}, {zone}"
+# Lines in the case description, skipped when the answer is empty
+details = [
+    ["Danger signs (child)", "danger_signs"],
+    ["Danger signs (pregnancy)", "pregnancy_danger_signs"],
+    ["MUAC (mm)", "muac_mm"],
+    ["Fever", "fever"],
+    ["Malaria RDT", "rdt"],
+    ["Diarrhoea", "diarrhoea"],
+    ["Severe dehydration", "severe_dehydration"],
+    ["CHW notes", "notes"],
+]
+
+# --- Follow-up visits: what happened, written back to the case --------------------------
+# A CHW goes back (or calls), opens the follow-up form, picks the case from the list the
+# bridge keeps on that form, and records the outcome. The bridge updates that case only.
+[followup]
+# The Kobo project, matched by name; shared with the bridge's account with "Edit form" too,
+# so it can keep the list of open cases on it
+form = "Community health referral follow-up"
+# The question that picks the case: select_one_from_file open_cases.csv (values cs_<number>)
+key = "case"
+# The list the bridge uploads to the form: open cases only, columns name, label, zone,
+# team, reason, due (no names, phones or answers beyond those)
+list = "open_cases.csv"
+# Follow-up question → Case field. Only these, and the status, are ever written
+fields = { outcome = "cReferralOutcome" }
+# The answer that sets the case's status
+status = { question = "close_case", map = { yes = "Closed", no = "Pending" } }
+# The note posted on the case's stream for every follow-up (closed cases get only this)
+note = [
+    ["By", "chw"],
+    ["Date", "followup_date"],
+    ["Reached care", "reached"],
+    ["Outcome", "outcome"],
+    ["Notes", "followup_notes"],
+]
+
+# --- Case status back to Kobo -----------------------------------------------------------
+# The case's status as the Kobo submission's validation status, so Kobo's data table (and
+# its exports) show which referrals were followed up. Leave this out where validation
+# statuses are kept for data-quality review. The bridge's Kobo account then needs
+# "Validate submissions" on the form as well
+[kobo_status]
+map = { Pending = "validation_status_on_hold", Closed = "validation_status_approved" }
+
+# --- Routing: every matching route adds its team -------------------------------------
+# match: question = answer (for multiple-choice questions: the answer includes it)
+[[route]]
+match = { referral_reasons = "suspected_cholera" }
+team = "Surveillance"
+priority = "Urgent"
+follow_up_hours = 6
+
+[[route]]
+match = { referral_reasons = "child_danger_signs" }
+team = "Referral coordinators"
+priority = "Urgent"
+follow_up_hours = 24
+
+[[route]]
+match = { referral_reasons = "pregnancy_danger_signs" }
+team = "Referral coordinators"
+priority = "Urgent"
+follow_up_hours = 24
+
+[[route]]
+match = { referral_reasons = "dysentery" }
+team = "Referral coordinators"
+priority = "High"
+follow_up_hours = 48
+
+[[route]]
+match = { referral_reasons = "persistent_diarrhoea" }
+team = "Referral coordinators"
+priority = "High"
+follow_up_hours = 48
+
+[[route]]
+match = { referral_reasons = "sam" }
+team = "Nutrition (OTP)"
+priority = "High"
+follow_up_hours = 48
+
+[[route]]
+match = { referral_reasons = "mam" }
+team = "Nutrition (OTP)"
+priority = "Normal"
+follow_up_hours = 168
+
+# --- Fields: Kobo question → EspoCRM Case field ----------------------------------------
+# espo: the Case field (EspoCRM prefixes custom fields with "c"); none = description only
+# type: varchar | text | int | date | enum | multiEnum; left out for the form's select
+#   questions (select_one → enum, select_multiple → multiEnum)
+# labels: the field's label in other languages, e.g. { fr_FR = "Zone" } (ESPO_LANGUAGE)
+# options: Kobo choice name → label (the same names are stored in EspoCRM). Left out for
+#   select questions: espocrm-setup.py and the bridge read them from the deployed form, so
+#   a choice added in Kobo needs no change here. Written here, they win: for calculated
+#   questions (no choices in the form), or to relabel
+
+[[field]]
+kobo = "referral_reasons"
+espo = "cReferralReasons"
+type = "multiEnum"
+label = "Referral reasons"
+options = { child_danger_signs = "Child danger signs", pregnancy_danger_signs = "Pregnancy danger signs", sam = "Severe acute malnutrition", mam = "Moderate acute malnutrition", suspected_cholera = "Suspected cholera", dysentery = "Bloody diarrhoea", persistent_diarrhoea = "Diarrhoea 14 days or more" }
+
+[[field]]
+kobo = "referred_to"
+espo = "cReferredTo"
+label = "Referred to"
+
+[[field]]
+kobo = "visit_date"
+espo = "cVisitDate"
+type = "date"
+label = "Visit date"
+
+[[field]]
+kobo = "chw"
+espo = "cChw"
+label = "CHW"
+
+[[field]]
+kobo = "zone"
+espo = "cZone"
+label = "Zone"
+
+[[field]]
+kobo = "household_id"
+espo = "cHouseholdId"
+type = "varchar"
+label = "Household ID"
+
+[[field]]
+kobo = "patient_type"
+espo = "cPatientType"
+label = "Patient"
+
+[[field]]
+kobo = "age_months"
+espo = "cAgeMonths"
+type = "int"
+label = "Age (months)"
+
+[[field]]
+kobo = "sex"
+espo = "cSex"
+label = "Sex"
+
+[[field]]
+kobo = "caregiver_name"
+espo = "cCaregiverName"
+type = "varchar"
+label = "Caregiver or patient name"
+
+[[field]]
+kobo = "caregiver_phone"
+espo = "cCaregiverPhone"
+type = "varchar"
+label = "Phone (agreed to a call back)"
+
+[[field]]
+kobo = "muac_mm"
+espo = "cMuacMm"
+type = "int"
+label = "MUAC (mm)"
+
+# Filled in by staff, not from Kobo
+[[field]]
+espo = "cReferralOutcome"
+type = "enum"
+label = "Referral outcome"
+options = { arrived_treated = "Arrived, treated and sent home", admitted = "Arrived, admitted", enrolled = "Enrolled in programme", not_arrived = "Did not arrive", refused = "Refused referral", transferred = "Transferred", died = "Died" }
+
+# Description only (their labels for the details lines come from the form)
+[[field]]
+kobo = "danger_signs"
+
+[[field]]
+kobo = "pregnancy_danger_signs"
+
+[[field]]
+kobo = "fever"
+
+[[field]]
+kobo = "rdt"
+
+[[field]]
+kobo = "diarrhoea"
+
+[[field]]
+kobo = "severe_dehydration"
+
+[[field]]
+kobo = "notes"
