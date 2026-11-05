@@ -69,6 +69,12 @@ the app and by email if SMTP is set up), and with [escalation] its `escalate` us
 mentioned when a record is still unassigned after_hours later. Mentions need the bridge's
 role to have mentionPermission (setup sets it) and reach only users who can read the record.
 
+Media ([record] media = "attachments", [followup] media = true): the submission's files
+(those an answer refers to, in repeat groups too, not deleted) are copied into EspoCRM as
+attachments of the record, or of the follow-up's note, so staff without a Kobo account see
+them. Downloaded with the bridge's token from this Kobo only, up to media_max_mb (10) each;
+a bigger one is named in the description instead.
+
 Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
 CSV file on Kobo forms, for select_one_from_file, pulldata() or search(). Uploaded when
 it changed, at most every BRIDGE_LIST_MIN_SECONDS; only the listed columns, since the
@@ -228,6 +234,26 @@ class Kobo(Api):
             raise BridgeError(f'POST files of {uid}: unreachable ({type(e).__name__})') from e
         version = self.call('GET', f'/api/v2/assets/{uid}/')['version_id']
         self.call('PATCH', f'/api/v2/assets/{uid}/deployment/', body={'active': True, 'version_id': version})
+
+    def download(self, url, max_bytes):
+        """A submission's file, with the bridge's token: (bytes, content type), or None when
+        it's bigger than max_bytes. Only from this Kobo (the URL's host must be its own, or
+        the Host header it sends), so a submission can't make the bridge fetch elsewhere."""
+        target, base = urllib.parse.urlsplit(url), urllib.parse.urlsplit(self.base)
+        if target.hostname not in (base.hostname, self.headers.get('Host')):
+            raise BridgeError(f'attachment not on this Kobo ({target.hostname})', status='template')
+        path = target.path + ('?' + target.query if target.query else '')
+        req = urllib.request.Request(self.base + path, headers=self.headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                data = r.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    return None
+                return data, r.headers.get_content_type()
+        except urllib.error.HTTPError as e:
+            raise BridgeError(f'GET attachment: HTTP {e.code}', status=e.code) from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            raise BridgeError(f'GET attachment: unreachable ({type(e).__name__})') from e
 
     def submission(self, uid, sub_id):
         """One submission, or None if it was deleted."""
@@ -489,6 +515,51 @@ def link_requester(t, sub, espo, body):
         body[req.get('account_link', 'account') + 'Id'] = account['id']
 
 
+def answer_strings(value, found=None):
+    """Every string answer, in groups and repeat groups too (not _attachments)."""
+    found = set() if found is None else found
+    if isinstance(value, str):
+        found.add(value)
+    elif isinstance(value, list):
+        for v in value:
+            answer_strings(v, found)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if k != '_attachments':
+                answer_strings(v, found)
+    return found
+
+
+def submission_files(sub):
+    """The submission's files that an answer still refers to (as kobo2logie does): not
+    deleted, and named by a question's answer, in repeat groups too."""
+    named = answer_strings(sub)
+    return [x for x in sub.get('_attachments') or []
+            if not x.get('is_deleted') and (x.get('media_file_basename')
+                                            or x.get('filename', '').rsplit('/', 1)[-1]) in named]
+
+
+def copy_media(kobo, espo, sub, related_type, field, max_mb=10):
+    """Copy the submission's files into EspoCRM, as Attachments for `field` of a
+    `related_type` record (or a Note's attachments). Returns (attachment ids, names of the
+    files too big to copy). Raises BridgeError (unreachable: the pass ends and it's tried
+    again; nothing half-made, as the record is created after)."""
+    ids, skipped = [], []
+    for x in submission_files(sub):
+        name = x.get('media_file_basename') or x['filename'].rsplit('/', 1)[-1]
+        got = kobo.download(x.get('download_url') or x.get('download_large_url'), int(max_mb * 1024 * 1024))
+        if got is None:
+            skipped.append(name)
+            continue
+        data, mime = got
+        mime = x.get('mimetype') or mime or 'application/octet-stream'
+        a = espo.call('POST', '/Attachment', body={
+            'name': name, 'type': mime, 'role': 'Attachment', 'relatedType': related_type, 'field': field,
+            'file': f'data:{mime};base64,' + base64.b64encode(data).decode()})
+        ids.append(a['id'])
+    return ids, skipped
+
+
 def mention(t, espo, entity, record_id, users, message):
     """A note on the record @mentioning users: EspoCRM notifies each one who can read it."""
     users = sorted(set(users))
@@ -583,7 +654,7 @@ def case_number(t, sub):
     return int(value[3:])
 
 
-def followup(t, sub, espo, espo_fu, uid, labels, counts):
+def followup(t, sub, espo, espo_fu, uid, labels, counts, kobo=None):
     """Apply a follow-up visit to its record: the case numbered by the key question
     (cs_<number>), or with [followup] match the record of the template's entity whose
     `match` field has the key's answer (e.g. a site code picked from sites.csv). Raises
@@ -626,10 +697,16 @@ def followup(t, sub, espo, espo_fu, uid, labels, counts):
             espo_fu.call('PUT', f'/{entity}/{case["id"]}', body=body)
     else:
         lines.append(f'(The case was already {case["status"].lower()}: not changed.)')
+    files = {}
+    if fu.get('media') and kobo is not None and submission_files(sub):  # photos of the visit, on its note
+        ids, skipped = copy_media(kobo, espo_fu, sub, 'Note', 'attachments', fu.get('media_max_mb', 10))
+        files = {'attachmentsIds': ids}
+        if skipped:
+            lines.append('Too big to copy (in Kobo): ' + ', '.join(skipped))
     # Last: the note is what marks this follow-up as applied
     espo_fu.call('POST', '/Note', body={'type': 'Post', 'parentType': entity, 'parentId': case['id'],
                                         'post': fu.get('title', 'Follow-up visit') + '\n'
-                                        + '\n'.join(lines) + '\n' + marker})
+                                        + '\n'.join(lines) + '\n' + marker, **files})
     counts['closed_note' if closed else 'updated'] += 1
     print(f'follow-up {sub["_id"]} of {uid} -> {entity} {n}' + (' (closed: note only)' if closed else ''))
 
@@ -777,7 +854,7 @@ def missing_fields(t, espo):
     return sorted(f['espo'] for f in bridge_fields(t) + t['field'] if f.get('espo') and f['espo'] not in have)
 
 
-def handle(t, sub, kobo_url, uid, teams, espo, counts):
+def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
     """Open the submission's record if it needs one, or update the one it matches. Raises
     BridgeError."""
     entity = t['entity']
@@ -815,6 +892,13 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts):
         print(f'{entity} {same["id"]} updated by {uid} submission {sub["_id"]} (same {attr})')
         return
     link_requester(t, sub, espo, body)
+    media = t['record'].get('media')
+    if media and kobo is not None and submission_files(sub):
+        ids, skipped = copy_media(kobo, espo, sub, entity, media, t['record'].get('media_max_mb', 10))
+        body[media + 'Ids'] = ids
+        if skipped:
+            body['description'] = '\n'.join(filter(None, [body.get('description'),
+                                                           'Too big to copy (in Kobo): ' + ', '.join(skipped)]))
     # With [record] match it was looked up just now: EspoCRM's own duplicate check (by name)
     # would refuse, say, a second volunteer with the same name
     record = espo.call('POST', f'/{entity}', body=body,
@@ -853,7 +937,8 @@ def escalate(t, espo, ledger, now):
             continue
         users = set().union(*(by_team.get(names.get(i), set()) for i in row.get('teamsIds') or []), set())
         hours = float(esc['after_hours'])
-        wait = f'{round(hours * 60)} minutes' if hours < 1 else f'{hours:g} hours'
+        n = round(hours * 60) if hours < 1 else hours
+        wait = f'{n:g} {"minute" if hours < 1 else "hour"}{"" if n == 1 else "s"}'
         mention(t, espo, t['entity'], row['id'], users, esc.get(
             'message', f'Still unassigned {wait} after it came in from Kobo:'))
         ledger.set_seen(key, str(now))
@@ -961,7 +1046,7 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
             elif espo_ed and sub.get('meta/deprecatedID'):  # an edit, maybe retried
                 apply_edit(t, sub, kobo_url, uid, teams, espo, espo_ed, counts)
             else:
-                handle(t, sub, kobo_url, uid, teams, espo, counts)
+                handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=kobo)
             ledger.resolved(uid, sub['_id'])
             return True
         except BridgeError as e:
@@ -1017,7 +1102,7 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
         labels = {q: opts for q, (_, opts) in form_choices(kobo.form(uid, version), t.get('language')).items()}
 
         def apply(sub, uid=uid, labels=labels):
-            followup(t, sub, espo, espo_fu, uid, labels, counts)
+            followup(t, sub, espo, espo_fu, uid, labels, counts, kobo=kobo)
         if ledger.retry_all_if_changed(f'version:{uid}', version, asset=uid):
             print(f'{uid}: new follow-up form version, retrying its failed submissions')
         for sub_id in ledger.due(uid, now):

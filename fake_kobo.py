@@ -7,6 +7,7 @@ no Kobo server: the endpoints bridge.py uses, nothing more. Stdlib only.
     kobo = FakeKobo(port=8099, token='t').start()
     uid = kobo.add_form('My form', content)          # XLSForm-style {survey, choices, settings}
     kobo.submit(uid, {'question': 'answer', ...})    # adds _id, _uuid, _submission_time
+    kobo.submit(uid, {'photo': 'p.jpg'}, files={'p.jpg': (data, 'image/jpeg')})  # with an attachment
     kobo.edit(uid, sub_id, {...})                    # as Kobo does: new _uuid, meta/deprecatedID
     kobo.down = True                                 # every request then gets a 503
     kobo.media[uid]                                  # {filename: bytes} the bridge uploaded
@@ -29,6 +30,7 @@ class FakeKobo:
     def __init__(self, port=0, token='fake-token', host='127.0.0.1'):
         self.token, self.down = token, False
         self.forms, self.subs, self.media, self.validation, self.requests = {}, {}, {}, {}, []
+        self.files = {}  # attachment uid -> (bytes, mimetype)
         self.lock = threading.Lock()
         self.server = ThreadingHTTPServer((host, port), self._handler())
         self.port = self.server.server_address[1]
@@ -49,12 +51,21 @@ class FakeKobo:
             self.subs[uid], self.media[uid] = [], {}
         return uid
 
-    def submit(self, uid, answers, attachments=None):
+    def submit(self, uid, answers, attachments=None, files=None):
+        """files: {filename: (bytes, mimetype)}, served as Kobo serves attachments (with
+        the token); the answers should name them, as a photo question's answer does."""
         with self.lock:
             n = max((s['_id'] for s in self.subs[uid]), default=0) + 1
+            listed = list(attachments or [])
+            for i, (name, (data, mime)) in enumerate((files or {}).items(), start=1):
+                aid = f'att{n}x{i}'
+                self.files[aid] = (data, mime)
+                listed.append({'uid': aid, 'filename': f'user/attachments/{uid}/{name}', 'media_file_basename': name,
+                               'mimetype': mime, 'is_deleted': False, 'question_xpath': '',
+                               'download_url': f'{self.url}/api/v2/assets/{uid}/data/{n}/attachments/{aid}/'})
             sub = {'_id': n, '_uuid': str(uuid.uuid4()),
                    '_submission_time': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
-                   '_attachments': attachments or [], **{k: str(v) for k, v in answers.items()}}
+                   '_attachments': listed, **{k: str(v) for k, v in answers.items()}}
             sub['meta/instanceID'] = 'uuid:' + sub['_uuid']
             self.subs[uid].append(sub)
             return sub
@@ -139,6 +150,13 @@ class FakeKobo:
                     sub = next((s for s in subs if s['_id'] == int(rest[0])), None)
                     if sub is None:
                         return self.send(404, {'detail': 'Not found.'})
+                    if len(rest) > 2 and rest[1] == 'attachments' and rest[2] in fake.files:
+                        data, mime = fake.files[rest[2]]
+                        self.send_response(200)
+                        self.send_header('Content-Type', mime)
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        return self.wfile.write(data)
                     if len(rest) > 1 and rest[1] == 'validation_status':
                         fake.validation[(uid, sub['_id'])] = json.loads(body)['validation_status.uid']
                         return self.send(200, {'uid': fake.validation[(uid, sub['_id'])]})

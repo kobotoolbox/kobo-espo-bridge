@@ -63,7 +63,9 @@ required = ["email", "summary"]  # checked before anything is written
 match = { emailAddress = "email" }  # update the record that has this answer, don't add one
 single_team = true            # one team: the highest-priority matching route's
 set = { cSource = "Kobo form" }  # constants
-attachments = true            # links to the submission's files in Kobo
+media = "attachments"         # copy the submission's files into this attachment field
+media_max_mb = 10             # bigger files are named in the description instead
+attachments = true            # (or) links to the files in Kobo; they need a Kobo login
 panel = "Request"             # the record page's panel with the template's fields
 notify_message = "New request from Kobo:"
 
@@ -107,7 +109,14 @@ match = "siteCode"            # ...by this field (left out: cases by number, cs_
 fields = { condition = "status", visit_date = "lastVisit" }  # only these are written
 note = [["By", "visitor"], ["Notes", "visit_notes"]]
 user = "kobo-site-visits"     # its own API user: may edit only those fields
+media = true                  # the visit's photos, on its note
 ```
+
+**Media.** With `media`, the files a submission's answers refer to (in repeat groups too;
+not deleted ones) are downloaded with the bridge's token, from its own Kobo only (the
+URL's host is checked, so a submission can't make it fetch elsewhere), and attached to the
+record before it's created. Staff then see them without a Kobo account, with the record's
+access rules. As in kobo2logie (`src/lib/kobo.ts`, `attachmentsToForward`).
 
 kobo-in-a-box's template also has `[espo]` (offline, application name), `[[role]]`,
 `[[api_user]]` and `[demo]`, for its staff roles, its assistant and demo users.
@@ -134,8 +143,8 @@ is a redeploy of the form), `ESPO_LANGUAGE`.
 
 ## Tested
 
-- **Unit tests:** 45 (the box's 35, and 10 for records other than cases, requesters,
-  matching, one team, mentions, escalation and lists).
+- **Unit tests:** 47 (the box's 35, and 12 for records other than cases, requesters,
+  matching, one team, mentions, escalation, lists and media).
 - **End to end** against EspoCRM 10.0.11 with the fake Kobo: kobo-espo's
   `tests/cases/connection.py`, 65 checks (see its REPORT.md).
 - **kobo-in-a-box**'s own e2e (60 checks on the rig) ran against the version imported here,

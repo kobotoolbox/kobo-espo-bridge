@@ -293,3 +293,48 @@ class Lists(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Media(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        text = SUPPORT.replace('attachments = true', 'media = "attachments"\nmedia_max_mb = 0.001')
+        self.t = bridge.with_form(template(text, self.tmp.name), bridge.form_choices(FORM))
+
+    def kobo(self):
+        k = bridge.Kobo('https://kf.example.org', 'tok')
+        k.got = []
+
+        def download(url, max_bytes, k=k):
+            k.got.append(url)
+            data = b'x' * (2000 if 'big' in url else 10)
+            return None if len(data) > max_bytes else (data, 'image/jpeg')
+        k.download = download
+        return k
+
+    def att(self, name, deleted=False):
+        return {'media_file_basename': name, 'filename': f'u/attachments/{name}', 'mimetype': 'image/jpeg',
+                'is_deleted': deleted, 'download_url': f'https://kf.example.org/api/v2/assets/aX/data/1/attachments/{name}/'}
+
+    def test_files_named_by_answers_are_copied_onto_the_record(self):
+        espo, kobo, counts = Espo(), self.kobo(), {k: 0 for k in ('created', 'existing', 'merged', 'notified', 'skipped')}
+        s = sub(1, project='a', email='a@b.c', summary='s', photo='a.jpg',
+                visits=[{'visits/photo': 'r.jpg'}], big_photo='big.jpg',
+                _attachments=[self.att('a.jpg'), self.att('r.jpg'), self.att('big.jpg'),
+                              self.att('gone.jpg', deleted=True), self.att('old.jpg')])
+        bridge.handle({**self.t, 'missing': []}, s, 'http://kf', 'aX', TEAMS, espo, counts, kobo=kobo)
+        uploads = [b for e, b, _ in espo.posts if e == 'Attachment']
+        self.assertEqual([u['name'] for u in uploads], ['a.jpg', 'r.jpg'])  # in a repeat group too
+        self.assertTrue(all(u['relatedType'] == 'Case' and u['field'] == 'attachments'
+                            and u['file'].startswith('data:image/jpeg;base64,') for u in uploads))
+        case = espo.rows['Case'][0]
+        self.assertEqual(case['attachmentsIds'], ['Attachment-0', 'Attachment-1'])
+        self.assertIn('Too big to copy (in Kobo): big.jpg', case['description'])
+        self.assertEqual(len(kobo.got), 3)  # not the deleted one, not the one no answer names
+
+    def test_only_from_this_kobo(self):
+        k = bridge.Kobo('https://kf.example.org', 'tok')
+        with self.assertRaises(bridge.BridgeError) as e:
+            k.download('https://evil.example.com/x.jpg', 100)
+        self.assertTrue(e.exception.rejected)
