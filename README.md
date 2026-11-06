@@ -18,6 +18,7 @@ keep their user.
 |---|---|
 | `bridge.py` | The bridge: `run` (poll every `BRIDGE_POLL_SECONDS`), `once`, `failed DIR`, and `serve`: every connection in one process |
 | `connections.py` | `serve`: Kobo connections made in EspoCRM and template files, each set up and polled with its own users and ledger |
+| `propose.py` | A template from a Kobo form (`propose`), and what a submission would become (`preview`); writes nothing |
 | `setup.py` | Sets EspoCRM up for a template: fields, teams, the bridge's API users with only the rights the template needs |
 | `fake_kobo.py` | A fake Kobo (the KPI v2 endpoints the bridge uses), for end-to-end tests without a Kobo server |
 | `templates/health-referral.toml` | kobo-in-a-box's scenario (community health referrals) |
@@ -93,7 +94,7 @@ escalate = ["lead-a"]
 [[field]]                     # Kobo question -> EspoCRM field
 kobo = "category"
 espo = "cCategory"            # custom fields of EspoCRM's own entities start with "c"
-type = "enum"                 # varchar | text | int | date | datetime | enum | multiEnum | personName | link;
+type = "enum"                 # varchar | text | int | float | date | datetime | enum | multiEnum | personName | link;
                               # left out for select questions (the form says) or existing fields
 label = "Category"
 options = { forms = "Forms and XLSForm" }  # left out: from the deployed form
@@ -201,11 +202,33 @@ BRIDGE_TEMPLATES=/etc/bridge/templates BRIDGE_STATE_DIR=/var/lib/bridge \
   **Run by**, so a test service doesn't touch the real connections.
 - Still **one service per instance**: two would both poll the same forms.
 
+### A template from the form: `propose.py`
+
+```python
+import propose
+p = propose.propose(form_content, 'Contact', team='Roster', notify=['amina'],
+                    existing=fields_espocrm_has)    # {field: type}, optional
+p['template']   # TOML, ready to save as a connection (or a file); check it first
+p['fields']     # per question: its label, Kobo type, the EspoCRM field and type, a note
+p['left_out']   # [(question, why)]: notes, calculations, hidden fields, repeats, metadata
+propose.preview(parse_template(p['template']), submission, form_content)
+                # the record it would make, its teams, who's told, its files; or why not
+```
+
+Each question becomes a field of the matching type (text → varchar, or text if multiline;
+integer → int; decimal → float; select_one → enum, its options from the deployed form;
+files → the record's attachments; geopoint → varchar). A question named like `summary`
+or `site_name` names the record; on Contact, `full_name`, `email` and `phone` are its own
+fields and the email is `match`; on Case, the requester's name, email and organisation
+are `[requester]`; on a custom entity, a `..._code` question is `match`. On kobo-espo's
+forms the proposal matches the hand-written templates but for three naming choices
+(kobo-espo `tests/test_propose.py`). Follow-ups and lists have no defaults.
+
 ## Tested
 
-- **Unit tests:** 53 (the box's 35, and 18 for records other than cases, requesters,
+- **Unit tests:** 66 (the box's 35; 18 for records other than cases, requesters,
   matching, one team, mentions, escalation, lists, media and its file names, links by
-  lookup and datetimes).
+  lookup and datetimes; 13 for `propose` and `preview`).
 - **End to end** against EspoCRM 10.0.11: kobo-espo's `tests/cases/connection.py`, 73
   checks with the fake Kobo, 72 on kf.kobotoolbox.org (see its REPORT.md), through
   `serve` since 2026-11-06.

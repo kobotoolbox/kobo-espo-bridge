@@ -476,6 +476,11 @@ def to_record(t, sub, kobo_url, uid, team_ids):
                 body[espo] = int(float(value))
             except ValueError:  # the message would quote the answer: not logged
                 raise BridgeError(f'{q}: not a number', status='template') from None
+        elif kind == 'float':
+            try:
+                body[espo] = float(value)
+            except ValueError:
+                raise BridgeError(f'{q}: not a number', status='template') from None
         elif kind == 'datetime':
             try:
                 body[espo] = kobo_datetime(value)
