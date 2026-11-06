@@ -6,11 +6,13 @@ The EspoCRM MCP: connecting Kobo forms to EspoCRM from a conversation, next to k
 
 Needs the MCP SDK (espo_mcp/requirements.txt); the rest of the bridge stays stdlib only.
 Settings (env): those of tools.Instance (ESPO_URL, ESPO_SITE_URL, the admin password,
-KOBO_URL, KOBO_TOKEN_FILE, BRIDGE_NAME), MCP_KEYS_FILE (keys.py), MCP_PUBLIC_URL (where
-clients reach it, e.g. https://espo.example.org/bridge), MCP_HOST (0.0.0.0), MCP_PORT (8000).
+KOBO_URL, KOBO_TOKEN_FILE, BRIDGE_NAME), MCP_KEYS_FILE (keys.py), MCP_OAUTH and its other
+settings (oauth.py), MCP_PUBLIC_URL (where clients reach it, e.g.
+https://espo.example.org/bridge), MCP_HOST (0.0.0.0), MCP_PORT (8000).
 
-Only EspoCRM admins connect, each with their own key: `Authorization: Bearer <key>`
-(keys.py add <user>). Every call checks the key's user is still an active admin.
+Only EspoCRM admins connect: by signing in with their EspoCRM account (OAuth, for claude.ai
+and Claude Desktop: oauth.py), or with a key of their own, `Authorization: Bearer <key>`
+(keys.py add <user>; for Claude Code). Every call checks the user is still an active admin.
 """
 import functools
 import logging
@@ -22,7 +24,7 @@ from urllib.parse import urlsplit
 
 import anyio
 from mcp.server.auth.provider import AccessToken
-from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -30,7 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from espo_mcp import keys, tools  # noqa: E402
+from espo_mcp import keys, oauth, tools  # noqa: E402
 from espo_mcp.confirm import Refused  # noqa: E402
 
 log = logging.getLogger('espo_mcp')
@@ -96,8 +98,8 @@ def run_tool(fn):
 class Keys:
     """The SDK's token verifier: the bearer is an admin's MCP key (keys.py)."""
 
-    def __init__(self, espo, resource):
-        self.admins, self.resource = keys.Admins(espo), resource
+    def __init__(self, espo, resource, ttl=60):
+        self.admins, self.resource = keys.Admins(espo, ttl), resource
 
     async def verify_token(self, token):
         user = await anyio.to_thread.run_sync(self.admins.who, token)
@@ -117,14 +119,27 @@ Template = Annotated[str, Field(description="The connection's template (TOML), a
                                             'with the changes the user asked for.')]
 
 
-def build_server(inst=None, public_url=None):
+def build_server(inst=None, public_url=None, env=os.environ):
+    """(the server, its public URL). With OAuth (MCP_OAUTH, on by default), also the
+    authorization server and the sign-in page; keys work either way."""
     inst = inst or tools.Instance()
-    public_url = (public_url or os.environ.get('MCP_PUBLIC_URL') or inst.site_url + '/bridge').rstrip('/')
-    server = MCPServer(
-        name='espocrm-kobo', instructions=INSTRUCTIONS,
-        token_verifier=Keys(inst.espo, public_url + '/mcp'),
-        auth=AuthSettings(issuer_url=public_url, resource_server_url=public_url + '/mcp',
-                          validate_token_resource=True))
+    public_url = (public_url or env.get('MCP_PUBLIC_URL') or inst.site_url + '/bridge').rstrip('/')
+    # how long an admin check holds (MCP_ADMIN_CHECK_SECONDS, 60; the tests' 0)
+    key_verifier = Keys(inst.espo, public_url + '/mcp', int(env.get('MCP_ADMIN_CHECK_SECONDS', '60')))
+    settings = {'issuer_url': public_url, 'resource_server_url': public_url + '/mcp', 'validate_token_resource': True}
+    signin = None
+    if oauth.enabled(env):
+        provider = oauth.Provider(key_verifier.admins, key_verifier, public_url, inst.espo_url, inst.site_url,
+                                  oauth.Sealer(oauth.load_key(oauth.key_file(env))))
+        signin = oauth.SignIn(provider, env)
+        server = MCPServer(name='espocrm-kobo', instructions=INSTRUCTIONS, auth_server_provider=provider,
+                           auth=AuthSettings(**settings, client_registration_options=ClientRegistrationOptions(
+                               enabled=True)))
+        server.custom_route('/login', methods=['GET'])(signin.login)
+        server.custom_route('/login/callback', methods=['POST'])(signin.callback)
+    else:
+        server = MCPServer(name='espocrm-kobo', instructions=INSTRUCTIONS, token_verifier=key_verifier,
+                           auth=AuthSettings(**settings))
 
     def tool(annotations):
         def register(fn):
@@ -240,8 +255,8 @@ def transport_security(public_url):
                                      allowed_origins=[f'{public.scheme}://{public.netloc}'])
 
 
-def http_app(inst=None, public_url=None):
-    server, public_url = build_server(inst, public_url)
+def http_app(inst=None, public_url=None, env=os.environ):
+    server, public_url = build_server(inst, public_url, env)
     return server.streamable_http_app(stateless_http=True, host=os.environ.get('MCP_HOST', '0.0.0.0'),
                                       transport_security=transport_security(public_url))
 

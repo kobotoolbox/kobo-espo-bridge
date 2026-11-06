@@ -222,14 +222,35 @@ preview of its latest submission), `preview_template`, `create_connection`,
 then shows the record) and `connection_status`. A prompt, **Connect a Kobo form to
 EspoCRM**, has the steps.
 
-- **Only EspoCRM admins**, each with their own key (`espo_mcp/keys.py add <user>`). The
-  keys file keeps hashes only, and every call checks the user is still an active admin.
+- **Only EspoCRM admins.** They connect in one of two ways, and every call checks the user
+  is still an active admin, so taking away someone's admin rights ends their access within
+  a minute:
+  - **signing in** (OAuth; claude.ai, Claude Desktop, or any client that does it): the
+    client finds the sign-in itself from the MCP's URL, and the admin types their
+    EspoCRM username and password, and their two-factor code if they use one, on the
+    MCP's page. EspoCRM checks them (and the session that makes is ended at once); they
+    aren't kept. Nothing is stored: client registrations and tokens are sealed with a key
+    the MCP makes on its first start (`MCP_OAUTH_KEY_FILE`, next to the keys file);
+    deleting it ends everyone's sessions. Tokens last an hour, refreshed for up to 30
+    days. `MCP_OAUTH=off` leaves only keys.
+  - **a key** each (`espo_mcp/keys.py add <user>`; Claude Code). The keys file keeps
+    hashes only.
+- **Behind a proxy at a path** (`MCP_PUBLIC_URL=https://espo.example.org/bridge`), clients
+  look for two documents at the site's root: route
+  `/.well-known/oauth-protected-resource/bridge/*` to the MCP as it is, and
+  `/.well-known/oauth-authorization-server/bridge` to its
+  `/.well-known/oauth-authorization-server` (kobo-espo's `deploy/Caddyfile` does both).
+  Set `MCP_CLIENT_IP_HEADER` to the proxy's `X-Forwarded-For`: the sign-in page allows 10
+  attempts per address, and per username, in 10 minutes.
 - **Every change takes two calls**: the first shows what would happen and returns a
   `confirm` token for exactly that change (signed, 10 minutes). No tool deletes anything,
   and none reads or writes records in general.
 - It runs beside `serve` (`python3 -I espo_mcp/server.py`, Streamable HTTP at `/mcp`, the
   SDK from `espo_mcp/requirements.txt`, or `espo_mcp/Dockerfile`), with the admin password
   and the bridge's Kobo token. It never polls: the service does.
+
+In claude.ai: Settings → Connectors → Add custom connector, the URL
+`https://espo.example.org/bridge/mcp`, then sign in. In Claude Code, with a key:
 
 ```bash
 claude mcp add --transport http espocrm https://espo.example.org/bridge/mcp \

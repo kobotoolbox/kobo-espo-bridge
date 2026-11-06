@@ -41,6 +41,7 @@ class Instance:
     def __init__(self, env=None):
         env = os.environ if env is None else env
         self.espo = admin_espo(env)
+        self.espo_url = env['ESPO_URL'].rstrip('/')
         self.site_url = (env.get('ESPO_SITE_URL') or env['ESPO_URL']).rstrip('/')
         self.kobo_url = env['KOBO_URL'].rstrip('/')
         self.kobo = Kobo(self.kobo_url, Path(env['KOBO_TOKEN_FILE']).read_text().strip())
