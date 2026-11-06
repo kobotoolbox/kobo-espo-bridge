@@ -267,8 +267,6 @@ def main():
     ap.add_argument('--state-dir', default=os.environ.get('BRIDGE_STATE_DIR', ''))
     args = ap.parse_args()
     secrets_path = Path(args.secrets)
-    t = load_template(args.template)
-    entity = t['entity']
     token = (Path(args.token_file).read_text().strip() if args.token_file and Path(args.token_file).is_file()
              else os.environ.get('KOBO_TOKEN', ''))
     kobo = None
@@ -276,18 +274,30 @@ def main():
         kobo = Kobo(args.kobo_url, token)
         if args.kobo_host:
             kobo.headers['Host'] = args.kobo_host
+    espo = Espo(args.url, basic=f'admin:{read_secrets(secrets_path).get("ESPO_ADMIN_PASSWORD", "")}')
+    setup(load_template(args.template), espo, kobo, secrets_path, args.state_dir,
+          demo_users=args.demo_users, if_form_changed=args.if_form_changed)
+
+
+def setup(t, espo, kobo, secrets_path, state_dir='', demo_users=False, if_form_changed=False):
+    """Set up EspoCRM for template t (as loaded by load_template or parse_template), as
+    admin (espo), with its forms' choices from Kobo (kobo, or None). The API keys and demo
+    passwords go to secrets_path; state_dir, if given, keeps what this setup was for
+    (setup.json). With if_form_changed, nothing is done unless the template or a form's
+    deployed version changed since. Returns whether it set up."""
+    secrets_path = Path(secrets_path)
+    entity = t['entity']
     projects, choices = kobo_forms(t, kobo)
-    seen_path = Path(args.state_dir) / 'setup.json' if args.state_dir else None
+    seen_path = Path(state_dir) / 'setup.json' if state_dir else None
     seen = {'template': t['hash'], 'forms': projects}
-    if args.if_form_changed:
+    if if_form_changed:
         try:
             if json.loads(seen_path.read_text()) == seen:
-                return
+                return False
         except (OSError, ValueError, AttributeError):
             pass
         print(f'form or template changed: setting up again ({", ".join(sorted(projects)) or "no form yet"})')
     t = with_form(t, choices)
-    espo = Espo(args.url, basic=f'admin:{read_secrets(secrets_path)["ESPO_ADMIN_PASSWORD"]}')
 
     settings, conf = {}, t.get('espo') or {}
     if conf.get('offline'):
@@ -341,7 +351,7 @@ def main():
         found[key] = user['apiKey']
 
     demo = t.get('demo') or {}
-    if args.demo_users and demo:
+    if demo_users and demo:
         have = read_secrets(secrets_path)
         people = [(slug(n), demo['worker'], [teams[n]]) for n in sorted(teams)]
         if demo.get('supervisor'):
@@ -363,6 +373,7 @@ def main():
     if seen_path:
         seen_path.parent.mkdir(parents=True, exist_ok=True)
         seen_path.write_text(json.dumps(seen, indent=2) + '\n')
+    return True
 
 
 if __name__ == '__main__':

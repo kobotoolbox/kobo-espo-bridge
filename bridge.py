@@ -281,9 +281,13 @@ class Kobo(Api):
 
 
 def load_template(path):
-    raw = Path(path).read_bytes()
-    t = tomllib.loads(raw.decode())
-    t['hash'] = hashlib.sha256(raw).hexdigest()[:16]  # a change retries every failure
+    return parse_template(Path(path).read_bytes().decode(), path)
+
+
+def parse_template(text, name='template'):
+    """A template from its TOML text (a file's, or a connection record's); name is for errors."""
+    t = tomllib.loads(text)
+    t['hash'] = hashlib.sha256(text.encode()).hexdigest()[:16]  # a change retries every failure
     t.setdefault('route', [])
     t.setdefault('field', [])
     t.setdefault('list', [])
@@ -293,7 +297,7 @@ def load_template(path):
     t['labels'] = {f['kobo']: f.get('options', {}) for f in t['field'] if f.get('kobo')}
     for f in t['field']:
         if f.get('lookup') and not (f.get('type') == 'link' and f.get('entity')):
-            raise ValueError(f'{path}: field {f.get("kobo")}: lookup needs type = "link" and entity')
+            raise ValueError(f'{name}: field {f.get("kobo")}: lookup needs type = "link" and entity')
     return t
 
 
