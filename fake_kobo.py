@@ -29,8 +29,8 @@ PREFIX = '/api/v2/assets/'
 
 
 class FakeKobo:
-    def __init__(self, port=0, token='fake-token', host='127.0.0.1'):
-        self.token, self.down = token, False
+    def __init__(self, port=0, token='fake-token', host='127.0.0.1', username='bridge_test'):
+        self.token, self.down, self.username = token, False, username
         self.forms, self.subs, self.media, self.validation, self.requests = {}, {}, {}, {}, []
         self.files = {}  # attachment uid -> (bytes, mimetype)
         self.lock = threading.Lock()
@@ -115,6 +115,8 @@ class FakeKobo:
                     return self.send(503, {'detail': 'down'})
                 if self.headers.get('Authorization') != f'Token {fake.token}':
                     return self.send(401, {'detail': 'Invalid token.'})
+                if url.path.rstrip('/') in ('/me', '/api/v2/me'):  # the account the token is
+                    return self.send(200, {'username': fake.username})
                 if not url.path.startswith(PREFIX):
                     return self.send(404)
                 parts = [p for p in url.path[len(PREFIX):].split('/') if p]
@@ -171,6 +173,8 @@ class FakeKobo:
                 if 'meta/deprecatedID' in query:
                     rows = [s for s in rows if 'meta/deprecatedID' in s]
                 start, limit = int(q.get('start', 0)), int(q.get('limit', 100))
+                if json.loads(q.get('sort', '{}')).get('_id') == -1:
+                    rows = rows[::-1]
                 page = rows[start:start + limit]
                 if 'fields' in q:
                     page = [{k: s.get(k) for k in json.loads(q['fields'])} for s in page]
