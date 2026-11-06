@@ -7,6 +7,8 @@ container (docker-compose.espocrm.yml); stdlib only.
     python3 -I bridge.py run          poll every BRIDGE_POLL_SECONDS
     python3 -I bridge.py once         one pass, then exit
     python3 -I bridge.py failed DIR   the submissions that couldn't become cases (support)
+    python3 -I bridge.py serve        every connection: those in EspoCRM and the template
+                                      files, in one process (connections.py)
 
 Settings (env): ESPO_URL, ESPO_API_KEY, KOBO_URL, KOBO_TOKEN_FILE, BRIDGE_TEMPLATE (a
 templates/*.toml), BRIDGE_STATE_DIR (the ledger and status.json), BRIDGE_POLL_SECONDS.
@@ -1230,6 +1232,10 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'failed' and len(sys.argv) == 3:
         return print_failed(sys.argv[2])
+    if cmd == 'serve':
+        sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I leaves it off the path
+        import connections
+        return connections.main(once=sys.argv[2:] == ['once'])
     if cmd not in ('run', 'once'):
         sys.exit(__doc__)
     env = os.environ

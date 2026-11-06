@@ -16,7 +16,8 @@ keep their user.
 
 | File | What it is |
 |---|---|
-| `bridge.py` | The bridge: `run` (poll every `BRIDGE_POLL_SECONDS`), `once`, `failed DIR` |
+| `bridge.py` | The bridge: `run` (poll every `BRIDGE_POLL_SECONDS`), `once`, `failed DIR`, and `serve`: every connection in one process |
+| `connections.py` | `serve`: Kobo connections made in EspoCRM and template files, each set up and polled with its own users and ledger |
 | `setup.py` | Sets EspoCRM up for a template: fields, teams, the bridge's API users with only the rights the template needs |
 | `fake_kobo.py` | A fake Kobo (the KPI v2 endpoints the bridge uses), for end-to-end tests without a Kobo server |
 | `templates/health-referral.toml` | kobo-in-a-box's scenario (community health referrals) |
@@ -170,13 +171,44 @@ Optional: `ESPO_FOLLOWUP_API_KEY` (follow-ups), `ESPO_EDITS_API_KEY` (edited sub
 cases only), `BRIDGE_POLL_SECONDS` (30), `BRIDGE_LIST_MIN_SECONDS` (900: each list upload
 is a redeploy of the form), `ESPO_LANGUAGE`.
 
+### Every connection in one service: `bridge.py serve`
+
+Instead of a setup and a bridge per template, one process runs them all:
+
+```bash
+ESPO_URL=https://espo.example.org ESPO_ADMIN_PASSWORD=... BRIDGE_SECRETS=/root/bridge.secrets \
+KOBO_URL=https://kf.example.org KOBO_TOKEN_FILE=/root/kobo.token \
+BRIDGE_TEMPLATES=/etc/bridge/templates BRIDGE_STATE_DIR=/var/lib/bridge \
+    python3 -I -u bridge.py serve        # or: serve once
+```
+
+- **Connections in EspoCRM.** The first `serve` makes the entity **Kobo connection**
+  (`CKoboConnection`). Admins make one with a name and the template pasted in (this
+  README's format), and it starts within one pass. No role is given the entity: only
+  admins see it. A connection without its own `[bridge]` user gets one,
+  `kobo-conn-<its name>`, so two connections never share a user or a role.
+- **Template files** (`BRIDGE_TEMPLATES`, `*.toml`) are shown there too, as connections
+  whose template is a copy of the file: edit the file. Unticking **Active** pauses one.
+- **Setup** (`setup.py`'s `setup()`) runs when a template is new or changed, and every
+  `BRIDGE_SETUP_SECONDS` (600) in case its form has a new version. It needs the admin
+  password (EspoCRM's API users can't change fields, layouts or roles). The keys it makes
+  go to `BRIDGE_SECRETS`.
+- **Each connection** has its own state directory (`BRIDGE_STATE_DIR/<file name>` or
+  `/<record id>`), ledger and API users, and its status is written to its record (Status,
+  Last pass, Waiting, Waiting since, Last error) as well as to `status.json`. One that fails
+  doesn't stop the others.
+- **`BRIDGE_NAME`** (default `main`): a record is run only by the service named in its
+  **Run by**, so a test service doesn't touch the real connections.
+- Still **one service per instance**: two would both poll the same forms.
+
 ## Tested
 
 - **Unit tests:** 53 (the box's 35, and 18 for records other than cases, requesters,
   matching, one team, mentions, escalation, lists, media and its file names, links by
   lookup and datetimes).
 - **End to end** against EspoCRM 10.0.11: kobo-espo's `tests/cases/connection.py`, 73
-  checks with the fake Kobo, 72 on kf.kobotoolbox.org (see its REPORT.md).
+  checks with the fake Kobo, 72 on kf.kobotoolbox.org (see its REPORT.md), through
+  `serve` since 2026-11-06.
 - **kobo-in-a-box**'s own e2e (60 checks on the rig) ran against the version imported here,
   not yet against this one: run it before the box switches.
 
