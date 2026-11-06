@@ -49,7 +49,8 @@ STATUSES = {'': '', 'ok': 'OK', 'waiting': 'Submissions waiting', 'failing': 'Pa
 # them (the panels say so)
 FIELDS = {
     'active': {'type': 'bool', 'default': True, 'label': 'Active'},
-    'template': {'type': 'text', 'rows': 30, 'label': 'Template'},
+    # displayRawText: else EspoCRM shows text as Markdown, and a TOML comment as a heading
+    'template': {'type': 'text', 'rows': 30, 'displayRawText': True, 'label': 'Template'},
     'runBy': {'type': 'varchar', 'maxLength': 50, 'default': 'main', 'label': 'Run by'},
     'templateFile': {'type': 'varchar', 'label': 'Template file'},
     'apiUser': {'type': 'varchar', 'label': 'API user'},
@@ -63,7 +64,7 @@ FIELDS = {
     'lastSuccess': {'type': 'datetime', 'label': 'Last good pass'},
     'waiting': {'type': 'int', 'label': 'Waiting'},
     'oldestWaiting': {'type': 'datetime', 'label': 'Waiting since'},
-    'lastError': {'type': 'text', 'label': 'Last error'},
+    'lastError': {'type': 'text', 'displayRawText': True, 'label': 'Last error'},
     'lastCounts': {'type': 'varchar', 'maxLength': 255, 'label': 'In the last pass'},
 }
 WRITTEN = ['koboForm', 'recordEntity', 'routeTeams', 'notifyUsers', 'status', 'lastSuccess', 'waiting',
@@ -73,7 +74,8 @@ STATUS_EVERY = 300  # the record's Last pass is written at least this often, els
 
 
 def ensure_entity(espo):
-    """The Kobo connection entity, its fields, page and list, and its tab. Made once."""
+    """The Kobo connection entity, its fields, page and list, and its tab. Made once; a
+    field's settings changed since are put right."""
     scope = espo.call('GET', '/Metadata', {'key': f'scopes.{ENTITY}'})
     if not scope:
         espo.call('POST', '/EntityManager/action/createEntity', body={
@@ -84,6 +86,10 @@ def ensure_entity(espo):
     new = [n for n in FIELDS if n not in have]
     for name in new:
         espo.call('POST', f'/Admin/fieldManager/{ENTITY}', body={'name': name, **FIELDS[name]})
+    for name, spec in FIELDS.items():  # made by an older bridge: its settings as they are now
+        if name not in new and any(have[name].get(k) != v for k, v in spec.items() if k not in ('label', 'translatedOptions')):
+            espo.call('PUT', f'/Admin/fieldManager/{ENTITY}/{name}', body={'name': name, **spec})
+            print(f'field updated: {ENTITY}.{name}')
     if not new and scope:
         return
     print(f'fields created: {ENTITY}: {", ".join(new)}')
