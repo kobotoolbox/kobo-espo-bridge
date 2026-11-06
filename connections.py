@@ -3,6 +3,7 @@ One bridge for every connection: `bridge.py serve`.
 
     python3 -I bridge.py serve          a pass over every connection, every BRIDGE_POLL_SECONDS
     python3 -I bridge.py serve once     one pass, then exit (1 if a connection's pass failed)
+    python3 -I bridge.py serve adopt F  template file F as a connection record (adopt())
 
 A connection is a Kobo form and the template that says what its submissions become in
 EspoCRM. They come from two places:
@@ -11,7 +12,7 @@ EspoCRM. They come from two places:
     entity, so only admins see it.
   - template files (BRIDGE_TEMPLATES, a directory of *.toml). Each is shown in EspoCRM as a
     connection whose template is a copy of the file: edit the file, not the record. The
-    record can still pause it (Active).
+    record can still pause it (Active). `serve adopt` makes a file a record instead.
 The entity is made by the first `serve` on an instance. A record is run by the service
 whose BRIDGE_NAME (default "main") is in its "Run by"; others leave it alone (the tests run
 their own).
@@ -284,8 +285,63 @@ class Service:
         return any(errors)
 
 
-def main(once=False):
+def adopt(service, paths):
+    """Template files as connection records, edited in EspoCRM from then on: `serve adopt
+    FILE...`, with the service stopped. For each file:
+      - shown as a file's connection already (its templateFile): the record becomes an
+        EspoCRM connection, and the file's state (ledger, cursor) moves to the record's, so
+        nothing is scanned again. The file must be gone from BRIDGE_TEMPLATES first, else
+        the next pass would show it again, a second connection on the same form;
+      - adopted before (a record of its name): nothing, the file isn't read again;
+      - neither: a new record, its template the file's.
+    Returns why each file not adopted wasn't."""
+    records = service.records()
+    if records is None:
+        return ['EspoCRM could not be read: nothing adopted']
+    errors = []
+    for arg in paths:
+        path = Path(arg if arg.endswith('.toml') else arg + '.toml')
+        name = path.name
+        rec = next((r for r in records if r.get('templateFile') == name), None)
+        if rec is None and any(not r.get('templateFile') and r.get('name') == path.stem for r in records):
+            print(f'{name}: adopted already, the connection "{path.stem}"')
+            continue
+        text = path.read_text() if path.is_file() else (rec or {}).get('template')
+        new = service.root / rec['id'] if rec else None
+        why = (f'still in {service.files}: remove it there first' if service.files and (service.files / name).exists()
+               else 'no such file, and no connection record has it' if text is None
+               else f'{new} exists already' if new and new.exists() else None)
+        if why is None:
+            try:
+                t = parse_template(text, name)
+            except ValueError as e:
+                why = f'its template: {e}'
+        if why:
+            errors.append(f'{name}: not adopted: {why}')
+            continue
+        user = (t.get('bridge') or {}).get('user') or (rec or {}).get('apiUser') or new_api_user(path.stem, records)
+        if rec is None:
+            rec = service.admin.call('POST', f'/{ENTITY}', body={
+                'name': path.stem, 'template': text, 'runBy': service.name, 'active': True, 'apiUser': user})
+            records.append(rec)
+            print(f'{name}: made the connection "{path.stem}" ({rec["id"]}); API user {user}')
+            continue
+        old = service.root / path.stem
+        if old.exists():
+            old.rename(new)
+        service.admin.call('PUT', f'/{ENTITY}/{rec["id"]}', body={'templateFile': '', 'template': text, 'apiUser': user})
+        print(f'{name}: now the connection "{rec["name"]}" ({rec["id"]}), edited in EspoCRM; API user {user}'
+              + (f'; its state moved to {new}' if new.exists() else ''))
+    return errors
+
+
+def main(once=False, adopt_files=None):
     service = Service(os.environ)
+    if adopt_files is not None:
+        errors = adopt(service, adopt_files)
+        for e in errors:
+            print(e, file=sys.stderr)
+        sys.exit(1 if errors or not adopt_files else 0)
     poll = int(os.environ.get('BRIDGE_POLL_SECONDS', '30'))
     print(f'bridge serve "{service.name}": connections in EspoCRM'
           + (f' and the templates in {service.files}' if service.files else '')

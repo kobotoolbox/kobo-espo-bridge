@@ -8,7 +8,8 @@ container (docker-compose.espocrm.yml); stdlib only.
     python3 -I bridge.py once         one pass, then exit
     python3 -I bridge.py failed DIR   the submissions that couldn't become cases (support)
     python3 -I bridge.py serve        every connection: those in EspoCRM and the template
-                                      files, in one process (connections.py)
+                                      files, in one process (connections.py); serve adopt
+                                      FILE...: a file's connection, edited in EspoCRM from now on
 
 Settings (env): ESPO_URL, ESPO_API_KEY, KOBO_URL, KOBO_TOKEN_FILE, BRIDGE_TEMPLATE (a
 templates/*.toml), BRIDGE_STATE_DIR (the ledger and status.json), BRIDGE_POLL_SECONDS.
@@ -1240,7 +1241,8 @@ def main():
     if cmd == 'serve':
         sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I leaves it off the path
         import connections
-        return connections.main(once=sys.argv[2:] == ['once'])
+        return connections.main(once=sys.argv[2:] == ['once'],
+                                adopt_files=sys.argv[3:] if sys.argv[2:3] == ['adopt'] else None)
     if cmd not in ('run', 'once'):
         sys.exit(__doc__)
     env = os.environ

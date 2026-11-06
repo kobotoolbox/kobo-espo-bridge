@@ -191,6 +191,12 @@ BRIDGE_TEMPLATES=/etc/bridge/templates BRIDGE_STATE_DIR=/var/lib/bridge \
   `kobo-conn-<its name>`, so two connections never share a user or a role.
 - **Template files** (`BRIDGE_TEMPLATES`, `*.toml`) are shown there too, as connections
   whose template is a copy of the file: edit the file. Unticking **Active** pauses one.
+- **`serve adopt FILE...`** (with the service stopped) makes template files connection
+  records, edited in EspoCRM from then on. A file already shown as a connection keeps its
+  record, and its state moves to the record's, so nothing is scanned again; take it out
+  of `BRIDGE_TEMPLATES` first (adopt refuses until then). A file with no connection gets
+  a new record. Adopting again does nothing, so a deploy can run it every time: kobo-espo
+  makes its four connections this way.
 - **Setup** (`setup.py`'s `setup()`) runs when a template is new or changed, and every
   `BRIDGE_SETUP_SECONDS` (600) in case its form has a new version. It needs the admin
   password (EspoCRM's API users can't change fields, layouts or roles). The keys it makes
