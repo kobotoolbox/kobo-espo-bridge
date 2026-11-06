@@ -19,6 +19,7 @@ keep their user.
 | `bridge.py` | The bridge: `run` (poll every `BRIDGE_POLL_SECONDS`), `once`, `failed DIR`, and `serve`: every connection in one process |
 | `connections.py` | `serve`: Kobo connections made in EspoCRM and template files, each set up and polled with its own users and ledger |
 | `propose.py` | A template from a Kobo form (`propose`), and what a submission would become (`preview`); writes nothing |
+| `espo_mcp/` | The EspoCRM MCP: connecting forms from a conversation, next to kobo-mcp (the only part that needs a package: the MCP SDK) |
 | `setup.py` | Sets EspoCRM up for a template: fields, teams, the bridge's API users with only the rights the template needs |
 | `fake_kobo.py` | A fake Kobo (the KPI v2 endpoints the bridge uses), for end-to-end tests without a Kobo server |
 | `templates/health-referral.toml` | kobo-in-a-box's scenario (community health referrals) |
@@ -201,6 +202,33 @@ BRIDGE_TEMPLATES=/etc/bridge/templates BRIDGE_STATE_DIR=/var/lib/bridge \
 - **`BRIDGE_NAME`** (default `main`): a record is run only by the service named in its
   **Run by**, so a test service doesn't touch the real connections.
 - Still **one service per instance**: two would both poll the same forms.
+
+### Connecting a form from a conversation: the EspoCRM MCP (`espo_mcp/`)
+
+An MCP server for an agent (Claude Code, ...) used together with
+[kobo-mcp](https://github.com/kobotoolbox/kobo-mcp): kobo-mcp builds, deploys and shares
+the form, and this one connects it. Its tools are task-shaped: `bridge_info` (the Kobo
+account to share forms with, and the connections), `list_teams`, `list_users`,
+`list_entities`, `propose_connection` (a template from the form, what was left out, and a
+preview of its latest submission), `preview_template`, `create_connection`,
+`update_connection`, `pause_connection`, `resume_connection`, `create_entity`,
+`grant_access` (team level only), `test_connection` (waits for the service's next pass,
+then shows the record) and `connection_status`. A prompt, **Connect a Kobo form to
+EspoCRM**, has the steps.
+
+- **Only EspoCRM admins**, each with their own key (`espo_mcp/keys.py add <user>`). The
+  keys file keeps hashes only, and every call checks the user is still an active admin.
+- **Every change takes two calls**: the first shows what would happen and returns a
+  `confirm` token for exactly that change (signed, 10 minutes). No tool deletes anything,
+  and none reads or writes records in general.
+- It runs beside `serve` (`python3 -I espo_mcp/server.py`, Streamable HTTP at `/mcp`, the
+  SDK from `espo_mcp/requirements.txt`, or `espo_mcp/Dockerfile`), with the admin password
+  and the bridge's Kobo token. It never polls: the service does.
+
+```bash
+claude mcp add --transport http espocrm https://espo.example.org/bridge/mcp \
+    --header "Authorization: Bearer <the key keys.py printed>"
+```
 
 ### A template from the form: `propose.py`
 
