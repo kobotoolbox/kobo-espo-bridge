@@ -85,7 +85,9 @@ one of `entity` whose `lookup` field has the answer (a standard by its code, a d
 its pcode); none, or more than one, and the submission is recorded, not guessed. Without
 lookup the answer is the record's id (e.g. picked from a [[list]] of ids). Datetimes
 (type = "datetime": `start`, `end`, datetime questions) are stored in UTC, from Kobo's
-local time with its offset.
+local time with its offset. A geopoint's [[field]] with `latitude` and `longitude` (field
+names) also fills those as numbers, for maps and dashboards; an unset fix (0 0) or a value
+out of range leaves them empty.
 
 Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
 CSV file on Kobo forms, for select_one_from_file, pulldata() or search(). Uploaded when
@@ -301,7 +303,31 @@ def parse_template(text, name='template'):
     for f in t['field']:
         if f.get('lookup') and not (f.get('type') == 'link' and f.get('entity')):
             raise ValueError(f'{name}: field {f.get("kobo")}: lookup needs type = "link" and entity')
+        if bool(f.get('latitude')) != bool(f.get('longitude')):
+            raise ValueError(f'{name}: field {f.get("kobo")}: latitude and longitude go together')
     return t
+
+
+def coordinate_fields(t):
+    """The float fields a geopoint's latitude and longitude go to (setup makes them)."""
+    out = []
+    for f in t['field']:
+        if f.get('latitude'):
+            label = f.get('label') or f['kobo']
+            out += [{'kobo': f['kobo'], 'espo': f['latitude'], 'type': 'float', 'label': f'{label} (latitude)'[:100]},
+                    {'kobo': f['kobo'], 'espo': f['longitude'], 'type': 'float', 'label': f'{label} (longitude)'[:100]}]
+    return out
+
+
+def geopoint(value):
+    """(latitude, longitude) from Kobo's "lat lon altitude accuracy", or None."""
+    try:
+        lat, lon = (float(x) for x in str(value).split()[:2])
+    except ValueError:
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return lat, lon
 
 
 def bridge_fields(t):
@@ -469,7 +495,11 @@ def to_record(t, sub, kobo_url, uid, team_ids):
     for f in t['field']:
         q, espo = f.get('kobo'), f.get('espo')
         value = a.get(q) if q else None
-        if not espo or value in (None, ''):
+        if value in (None, ''):
+            continue
+        if f.get('latitude') and geopoint(value):
+            body[f['latitude']], body[f['longitude']] = geopoint(value)
+        if not espo:
             continue
         kind = f.get('type')  # none: a text field, or one EspoCRM has already
         if kind == 'int':

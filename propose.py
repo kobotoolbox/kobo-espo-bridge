@@ -236,6 +236,16 @@ def propose(content, entity='Case', team=None, notify=(), existing=None, languag
         reused = espo in existing
         add(q, row, espo, espo_type if not reused else None, None if reused else lab,
             ('reuses the field EspoCRM has' + ('; ' + note if note else '')) if reused else note)
+        if kind == 'geopoint' and not any('latitude' in f for f in fields):
+            # The first geopoint also as numbers, for maps: the entity's latitude and
+            # longitude if it has them as floats, else new ones
+            if existing.get('latitude') == 'float' and existing.get('longitude') == 'float' and is_custom(entity):
+                lat, lon = 'latitude', 'longitude'
+            else:
+                lat, lon = unique(f'{q}_latitude', 'float'), unique(f'{q}_longitude', 'float')
+            fields[-1].update(latitude=lat, longitude=lon)
+            rows[-1]['note'] = (rows[-1]['note'] + '; ' if rows[-1]['note'] else '') + \
+                f'also as numbers in {lat} and {lon}, for maps'
     record.pop('_own', None)
     code = next((r for r in rows if r['kobo'] == 'text' and re.search(r'(^|_)code$', r['question'])
                  and r['espo'] not in ('name', '(attachments)')), None)

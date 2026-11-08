@@ -48,7 +48,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # -I leaves the script's own directory off the path
-from bridge import (BridgeError, Espo, Kobo, Ledger, bridge_fields, form_choices,  # noqa: E402
+from bridge import (BridgeError, Espo, Kobo, Ledger, bridge_fields, coordinate_fields, form_choices,  # noqa: E402
                     kobo_fields, load_template, route_teams, with_form)
 
 NONE = {'create': 'no', 'read': 'no', 'edit': 'no', 'delete': 'no', 'stream': 'no'}
@@ -311,7 +311,7 @@ def setup(t, espo, kobo, secrets_path, state_dir='', demo_users=False, if_form_c
         espo.call('PUT', '/Settings', body=settings)
         print(f'settings: {", ".join(sorted(settings))}')
 
-    template_fields = [f for f in t['field'] if f.get('espo')]
+    template_fields = [f for f in t['field'] if f.get('espo')] + coordinate_fields(t)
     changed = False
     if t.get('form'):
         changed = ensure_fields(espo, entity, bridge_fields(t) + template_fields)

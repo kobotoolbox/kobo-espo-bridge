@@ -379,6 +379,12 @@ lookup = "code"
 kobo = "end"
 espo = "registeredAt"
 type = "datetime"
+
+[[field]]
+kobo = "location"
+espo = "location"
+latitude = "latitude"
+longitude = "longitude"
 """
 
 
@@ -408,6 +414,16 @@ class LinksAndDatetimes(unittest.TestCase):
             self.assertTrue(e.exception.rejected)
             self.assertEqual(str(e.exception), f'standard: {found} CStandard records with that code')
         self.assertNotIn('CSite', self.espo.rows)
+
+    def test_geopoint_also_as_latitude_and_longitude(self):
+        body = bridge.to_record(self.t, sub(1, code='S1', location='18.0179 -76.8099 12 5'), 'http://kf', 'aX', TEAMS)
+        self.assertEqual((body['location'], body['latitude'], body['longitude']), ('18.0179 -76.8099 12 5', 18.0179, -76.8099))
+        for bad in ('0 0 0 0', '95 10', 'here'):  # an unset fix, out of range, not a geopoint: the text only
+            body = bridge.to_record(self.t, sub(1, code='S1', location=bad), 'http://kf', 'aX', TEAMS)
+            self.assertEqual((body['location'], 'latitude' in body), (bad, False))
+        self.assertEqual([f['espo'] for f in bridge.coordinate_fields(self.t)], ['latitude', 'longitude'])
+        with self.assertRaises(ValueError):
+            bridge.parse_template(SITES.replace('longitude = "longitude"\n', ''))
 
     def test_datetime_in_utc(self):
         body = bridge.to_record(self.t, sub(1, code='S1', end='2026-04-23T20:21:06.502+05:30'), 'http://kf', 'aX', TEAMS)

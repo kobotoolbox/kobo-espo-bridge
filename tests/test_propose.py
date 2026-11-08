@@ -96,6 +96,14 @@ class EveryType(unittest.TestCase):
         self.assertEqual(rows['people']['asked'], 'Combien ?')
         self.assertEqual(rows['photo']['espo'], '(attachments)')
 
+    def test_geopoint_also_as_numbers(self):
+        loc = next(f for f in self.t['field'] if f['kobo'] == 'location')
+        self.assertEqual((loc['latitude'], loc['longitude']), ('locationLatitude', 'locationLongitude'))
+        # An entity with latitude and longitude floats (kobo-espo's Site) gets those
+        have = propose.propose(EVERY, 'CSite', existing={'latitude': 'float', 'longitude': 'float'})
+        loc = next(f for f in bridge.parse_template(have['template'])['field'] if f['kobo'] == 'location')
+        self.assertEqual((loc['latitude'], loc['longitude']), ('latitude', 'longitude'))
+
     def test_select_options_come_from_the_form(self):
         self.assertNotIn('options', next(f for f in self.t['field'] if f['kobo'] == 'working'))
         t = bridge.with_form(self.t, bridge.form_choices(EVERY))
