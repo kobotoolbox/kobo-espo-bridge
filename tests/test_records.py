@@ -139,6 +139,9 @@ class Espo:
             row = next(r for r in self.rows[entity] if r['id'] == parts[1])
             row.update(body)
             return row
+        if method == 'DELETE':
+            self.rows[entity] = [r for r in self.rows[entity] if r['id'] != parts[1]]
+            return {}
         if method == 'GET' and len(parts) == 1:  # a list: escalation or a [[list]]
             rows = self.rows.get(entity, [])
             if params.get('where[0][type]') == 'isNull':
@@ -386,6 +389,96 @@ espo = "location"
 latitude = "latitude"
 longitude = "longitude"
 """
+
+
+ACTIVITY = """
+[form]
+name = "5W"
+
+[record]
+entity = "CActivity"
+name = "{activity_title}"
+required = ["sector"]
+
+[[field]]
+kobo = "sector"
+espo = "sector"
+
+[[repeat]]
+group = "FIGURES_COMMUNITY"
+entity = "CActivityLocation"
+link = "activity"
+name = "{activity_title} · {community}"
+
+[[repeat.field]]
+kobo = "community"
+espo = "community"
+type = "link"
+entity = "CAdminArea"
+lookup = "pcode"
+
+[[repeat.field]]
+kobo = "total_population_reached"
+espo = "peopleReached"
+type = "int"
+"""
+
+
+def activity(n, *communities, uuid_=None):
+    """A submission with a repeat group, as Kobo sends it: rows keyed by full paths."""
+    rows = [{'RESPONSES/FIGURES_COMMUNITY/community': c, 'RESPONSES/FIGURES_COMMUNITY/quantities/x': '1',
+             'RESPONSES/FIGURES_COMMUNITY/total_pop/total_population_reached': str(p)} for c, p in communities]
+    return {**sub(n, **{'RESPONSES/sector': 'WASH', 'RESPONSES/activity_title': 'Water trucking'}),
+            **({'_uuid': uuid_} if uuid_ else {}), 'RESPONSES/FIGURES_COMMUNITY': rows}
+
+
+class Repeats(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.t = {**bridge.with_form(template(ACTIVITY, self.tmp.name), {}), 'missing': []}
+        self.counts = {k: 0 for k in ('created', 'existing', 'merged', 'notified', 'skipped')}
+        self.espo = Espo()
+        self.espo.rows['CAdminArea'] = [{'id': 'a1', 'pcode': 'JM17001'}, {'id': 'a2', 'pcode': 'JM08004'}]
+
+    def handle(self, s):
+        bridge.handle(self.t, s, 'http://kf', 'aX', TEAMS, self.espo, self.counts)
+
+    def test_a_record_per_row_linked_to_the_submissions_record(self):
+        s = activity(1, ('JM17001', 40), ('JM08004', 25))
+        self.handle(s)
+        [act] = self.espo.rows['CActivity']
+        rows = self.espo.rows['CActivityLocation']
+        self.assertEqual([(r['activityId'], r['cKoboRow'], r['communityId'], r['peopleReached'], r['name'])
+                          for r in rows],
+                         [(act['id'], 1, 'a1', 40, 'Water trucking · JM17001'),
+                          (act['id'], 2, 'a2', 25, 'Water trucking · JM08004')])
+        self.assertEqual({r['cKoboSubmissionUuid'] for r in rows}, {s['_uuid']})
+        self.assertEqual(self.counts['rows'], 2)
+
+    def test_again_updates_the_rows_and_a_shorter_edit_drops_the_rest(self):
+        s = activity(1, ('JM17001', 40), ('JM08004', 25))
+        self.handle(s)
+        self.handle(activity(1, ('JM17001', 45), uuid_=s['_uuid']))  # its record exists: rows only
+        rows = self.espo.rows['CActivityLocation']
+        self.assertEqual([(r['cKoboRow'], r['peopleReached']) for r in rows], [(1, 45)])
+        self.assertEqual((len(self.espo.rows['CActivity']), self.counts['existing']), (1, 1))
+
+    def test_a_row_that_cant_be_linked_is_recorded_with_its_row(self):
+        with self.assertRaises(bridge.BridgeError) as e:
+            self.handle(activity(1, ('JM17001', 40), ('JM99999', 5)))
+        self.assertTrue(str(e.exception).startswith('FIGURES_COMMUNITY row 2: '), str(e.exception))
+        self.assertEqual(len(self.espo.rows['CActivityLocation']), 1)  # row 1 made; row 2 on the retry
+
+    def test_setup_role_makes_and_updates_rows_and_reads_their_lookups(self):
+        import setup
+        data = setup.bridge_role(self.t)['data']
+        self.assertEqual((data['CActivityLocation']['create'], data['CActivityLocation']['edit']), ('yes', 'all'))
+        self.assertEqual(data['CAdminArea'], {**setup.NONE, 'read': 'all'})
+
+    def test_a_repeat_needs_its_link(self):
+        with self.assertRaises(ValueError):
+            bridge.parse_template(ACTIVITY.replace('link = "activity"\n', ''))
 
 
 class LinksAndDatetimes(unittest.TestCase):

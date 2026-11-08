@@ -120,6 +120,19 @@ where = { status = ["operational", "needs_repair"] }
 columns = { name = "siteCode", label = "{siteCode} · {name}", status = "status" }
 forms = ["Site visit"]
 
+[[repeat]]                    # each row of a repeat group: a record of its own
+group = "FIGURES_COMMUNITY"   # the repeat group's name
+entity = "CActivityLocation"
+link = "activity"             # its link to the submission's record
+name = "{community}"
+
+[[repeat.field]]              # as [[field]], the row's questions (lookups too)
+kobo = "community"
+espo = "community"
+type = "link"
+entity = "CAdminArea"
+lookup = "pcode"
+
 [followup]                    # a second form that updates existing records
 form = "Site visit"
 key = "site"                  # the question that picks the record
@@ -145,6 +158,15 @@ there's none, or more than one, the submission is recorded with the count (never
 and tried again on the usual backoff, so a record made later in EspoCRM still gets it.
 Looked up before anything is written. (As kobo-connect's `Entity.link.field` headers do,
 rodekruis/kobo-connect; its other EspoCRM features the bridge had already.)
+
+**Repeat groups.** With `[[repeat]]`, each row of the repeat group becomes a record of
+`entity`, linked to the submission's record by `link` (an activity's communities, its focal
+points). Rows are matched again by the submission and their position (`cKoboRow`), so a
+retry updates them instead of adding more, and rows a shorter version no longer has are
+removed. A row that can't be made (a lookup that finds nothing) is recorded with its row
+number; the submission's record and its good rows stay, and the rest come on the retry.
+The bridge's role may create, edit and delete that entity's records. `propose` doesn't
+write `[[repeat]]` yet: it still leaves repeat groups out, with a warning.
 
 **Datetimes.** Kobo sends `2026-04-23T20:21:06.502+05:30` (the phone's local time and
 offset); `datetime` fields store it as EspoCRM's UTC `2026-04-23 14:51:06`. Without an

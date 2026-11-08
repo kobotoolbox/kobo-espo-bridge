@@ -89,6 +89,15 @@ local time with its offset. A geopoint's [[field]] with `latitude` and `longitud
 names) also fills those as numbers, for maps and dashboards; an unset fix (0 0) or a value
 out of range leaves them empty.
 
+Repeat groups ([[repeat]], with group, entity, link, name, and its own [[repeat.field]]s):
+each row of the repeat group is a record of `entity` too, its `link` set to the
+submission's record (e.g. an activity's communities, one record each). A row's answers
+can be named as the submission's; the submission's own answers (outside the repeat)
+are there too, for its name. Rows are matched again by the submission and the row's
+position (cKoboRow), so a retried submission updates its rows rather than adding more;
+rows that a shorter edit no longer has are removed. A submission whose record exists
+already still gets its rows (a row that failed is tried again with it).
+
 Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
 CSV file on Kobo forms, for select_one_from_file, pulldata() or search(). Uploaded when
 it changed, at most every BRIDGE_LIST_MIN_SECONDS; only the listed columns, since the
@@ -113,6 +122,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Fields the bridge itself fills on every record, whatever the template
+ROW_FIELD = {'espo': 'cKoboRow', 'type': 'int', 'label': 'Kobo repeat row'}  # a [[repeat]] row's position
 BRIDGE_FIELDS = [
     {'espo': 'cKoboAsset', 'type': 'varchar', 'label': 'Kobo project'},
     {'espo': 'cKoboSubmissionId', 'type': 'int', 'label': 'Kobo submission'},
@@ -296,6 +306,7 @@ def parse_template(text, name='template'):
     t.setdefault('route', [])
     t.setdefault('field', [])
     t.setdefault('list', [])
+    t.setdefault('repeat', [])
     # [record] (any entity); [case], its older name, still works
     t['record'] = t.get('record') or t.get('case') or {}
     t['entity'] = t['record'].get('entity', 'Case')
@@ -305,7 +316,20 @@ def parse_template(text, name='template'):
             raise ValueError(f'{name}: field {f.get("kobo")}: lookup needs type = "link" and entity')
         if bool(f.get('latitude')) != bool(f.get('longitude')):
             raise ValueError(f'{name}: field {f.get("kobo")}: latitude and longitude go together')
+    for r in t['repeat']:
+        if not all(r.get(k) for k in ('group', 'entity', 'link')):
+            raise ValueError(f'{name}: a [[repeat]] needs group, entity and link (the field linking a row to its record)')
+        r.setdefault('field', [])
+        for f in r['field']:
+            if f.get('lookup') and not (f.get('type') == 'link' and f.get('entity')):
+                raise ValueError(f'{name}: repeat {r["group"]} field {f.get("kobo")}: lookup needs type = "link" and entity')
     return t
+
+
+def repeat_template(t, r):
+    """A [[repeat]] as a template of its own: its entity, fields and name, no routes."""
+    return {**t, 'entity': r['entity'], 'field': r['field'], 'record': {'name': r['name']} if r.get('name') else {},
+            'route': [], 'requester': None, 'form': {}, 'repeat': [], 'missing': []}
 
 
 def coordinate_fields(t):
@@ -973,7 +997,9 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
     if t.get('missing'):
         raise BridgeError(f'fields not in EspoCRM yet ({", ".join(t["missing"])}): run setup '
                           '(box.sh runs it every 10 min)', status='template')
-    if espo.find(entity, 'cKoboSubmissionUuid', sub['_uuid'], select='id'):
+    existing = espo.find(entity, 'cKoboSubmissionUuid', sub['_uuid'], select='id')
+    if existing:
+        sync_rows(t, sub, kobo_url, uid, espo, existing['id'], counts)
         counts['existing'] += 1
         return
     resolve_links(t, sub, espo, body)  # before anything is written
@@ -994,6 +1020,7 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
             'post': f'Updated from Kobo submission {sub["_id"]} (it matched on {attr}).'})
         counts['merged'] += 1
         print(f'{entity} {same["id"]} updated by {uid} submission {sub["_id"]} (same {attr})')
+        sync_rows(t, sub, kobo_url, uid, espo, same['id'], counts)
         return
     link_requester(t, sub, espo, body)
     media = t['record'].get('media')
@@ -1010,11 +1037,46 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
     counts['created'] += 1
     print(f'{entity} {record["id"]} for {uid} submission {sub["_id"]} '
           f'({body.get("priority", "-")}, {len(body["teamsIds"])} team(s))')
+    sync_rows(t, sub, kobo_url, uid, espo, record['id'], counts)
     users = [u for r in matching_routes(t, flat(sub)) for u in r.get('notify', [])]
     if users:
         mention(t, espo, entity, record['id'], users,
                 t['record'].get('notify_message', 'New from Kobo, please look at it:'))
         counts['notified'] += 1
+
+
+def sync_rows(t, sub, kobo_url, uid, espo, record_id, counts):
+    """[[repeat]]: each row of the submission's repeat group as a record linked to
+    record_id, made or updated by (submission, row); rows past the last one removed."""
+    outer = {k: v for k, v in sub.items() if not isinstance(v, list)}
+    for r in t.get('repeat', []):
+        rt = repeat_template(t, r)
+        rows = flat(sub).get(r['group']) or []
+        have = {}
+        for x in espo.call('GET', f'/{r["entity"]}', {
+                'where[0][type]': 'equals', 'where[0][attribute]': 'cKoboSubmissionUuid',
+                'where[0][value]': sub['_uuid'], 'select': 'id,cKoboRow', 'maxSize': 200})['list']:
+            have[x.get('cKoboRow')] = x['id']
+        for n, row in enumerate(rows if isinstance(rows, list) else [], 1):
+            psub = {**outer, **row}
+            try:
+                body = to_record(rt, psub, kobo_url, uid, {})
+                if body is not None:
+                    resolve_links(rt, psub, espo, body)
+            except BridgeError as e:
+                raise BridgeError(f'{r["group"]} row {n}: {e}', status=e.status) from None
+            if body is None:
+                continue
+            body.update({ROW_FIELD['espo']: n, r['link'] + 'Id': record_id})
+            if n in have:
+                body.pop('teamsIds', None)  # the row's teams are its formula's (its record's)
+                espo.call('PUT', f'/{r["entity"]}/{have[n]}', body=body)
+            else:
+                espo.call('POST', f'/{r["entity"]}', body=body, headers={'X-Skip-Duplicate-Check': 'true'})
+            counts['rows'] = counts.get('rows', 0) + 1
+        for n, row_id in have.items():
+            if n is not None and n > len(rows):
+                espo.call('DELETE', f'/{r["entity"]}/{row_id}')
 
 
 def escalate(t, espo, ledger, now, uids):
@@ -1138,7 +1200,7 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
     teams = team_ids(t, espo)
     counts = {'seen': 0, 'created': 0, 'skipped': 0, 'existing': 0, 'failed': 0, 'retried': 0,
               'updated': 0, 'closed_note': 0, 'lists': 0, 'edited': 0, 'statuses': 0,
-              'merged': 0, 'notified': 0, 'escalated': 0}
+              'merged': 0, 'notified': 0, 'escalated': 0, 'rows': 0}
     if t['entity'] != 'Case':
         espo_ed = None  # edits (apply_edit) are for cases only, as yet
     if ledger.retry_all_if_changed('template', t['hash']):

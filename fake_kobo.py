@@ -28,6 +28,13 @@ from bridge import stored_name
 PREFIX = '/api/v2/assets/'
 
 
+
+def answer(value):
+    """As Kobo sends answers: text, and a repeat group as a list of rows (each of text)."""
+    if isinstance(value, list):
+        return [{k: answer(v) for k, v in row.items()} for row in value]
+    return str(value)
+
 class FakeKobo:
     def __init__(self, port=0, token='fake-token', host='127.0.0.1', username='bridge_test'):
         self.token, self.down, self.username = token, False, username
@@ -68,7 +75,7 @@ class FakeKobo:
                                'download_url': f'{self.url}/api/v2/assets/{uid}/data/{n}/attachments/{aid}/'})
             sub = {'_id': n, '_uuid': str(uuid.uuid4()),
                    '_submission_time': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
-                   '_attachments': listed, **{k: str(v) for k, v in answers.items()}}
+                   '_attachments': listed, **{k: answer(v) for k, v in answers.items()}}
             sub['meta/instanceID'] = 'uuid:' + sub['_uuid']
             self.subs[uid].append(sub)
             return sub
@@ -77,7 +84,7 @@ class FakeKobo:
         with self.lock:
             sub = next(s for s in self.subs[uid] if s['_id'] == sub_id)
             old = sub['_uuid']
-            sub.update({k: str(v) for k, v in answers.items()})
+            sub.update({k: answer(v) for k, v in answers.items()})
             sub['_uuid'] = str(uuid.uuid4())
             sub['meta/deprecatedID'] = 'uuid:' + old
             sub['meta/instanceID'] = 'uuid:' + sub['_uuid']

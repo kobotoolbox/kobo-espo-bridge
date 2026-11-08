@@ -48,7 +48,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # -I leaves the script's own directory off the path
-from bridge import (BridgeError, Espo, Kobo, Ledger, bridge_fields, coordinate_fields, form_choices,  # noqa: E402
+from bridge import (BRIDGE_FIELDS, ROW_FIELD, BridgeError, Espo, Kobo, Ledger, bridge_fields,  # noqa: E402
+                    coordinate_fields, form_choices, repeat_template,
                     kobo_fields, load_template, route_teams, with_form)
 
 NONE = {'create': 'no', 'read': 'no', 'edit': 'no', 'delete': 'no', 'stream': 'no'}
@@ -202,8 +203,10 @@ def bridge_role(t):
             data[e] = {'create': 'yes', 'read': 'all', 'edit': 'all', 'delete': 'no', 'stream': 'no'}
     for spec in t['list']:
         data.setdefault(spec['entity'], {**NONE, 'read': 'all'})
-    for f in t['field']:  # links by lookup: it finds the record to link
-        if f.get('type') == 'link' and f.get('lookup'):
+    for r in t.get('repeat', []):  # each row a record, updated again on a retry
+        data[r['entity']] = {'create': 'yes', 'read': 'all', 'edit': 'all', 'delete': 'all', 'stream': 'no'}
+    for f in t['field'] + [f for r in t.get('repeat', []) for f in r['field']]:
+        if f.get('type') == 'link' and f.get('lookup'):  # links by lookup: it finds the record to link
             data.setdefault(f['entity'], {**NONE, 'read': 'all'})
     # assignmentPermission: setting a record's teams needs it
     return {'data': data, 'fieldData': {}, **NO_PERMISSIONS, 'assignmentPermission': 'all',
@@ -316,6 +319,12 @@ def setup(t, espo, kobo, secrets_path, state_dir='', demo_users=False, if_form_c
     if t.get('form'):
         changed = ensure_fields(espo, entity, bridge_fields(t) + template_fields)
         ensure_layouts(espo, t, [f for f in template_fields if 'type' in f])
+        for r in t['repeat']:  # its rows' entity: the bridge's fields, the row's position, its own
+            rt = repeat_template(t, r)
+            row_fields = [f for f in rt['field'] if f.get('espo')] + coordinate_fields(rt)
+            changed = ensure_fields(espo, r['entity'], [f for f in BRIDGE_FIELDS if f['espo'] != 'cFollowUpDue']
+                                    + [ROW_FIELD] + row_fields) or changed
+            ensure_layouts(espo, rt, [f for f in row_fields if 'type' in f])
     if changed and seen_path and (seen_path.parent / 'bridge.sqlite').exists():
         Ledger(seen_path.parent / 'bridge.sqlite').retry_now()
         print("bridge: its failed submissions are retried now")
