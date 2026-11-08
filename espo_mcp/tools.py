@@ -4,8 +4,9 @@ SDK: they take the Instance (EspoCRM as admin, the bridge's Kobo account) and re
 dicts. A tool that can't do what it was asked raises Refused with a message for the agent.
 
 Task-shaped, not raw access: no tool reads or writes arbitrary records. Every change
-(create_connection, update_connection, create_entity, grant_access, pause_connection)
-takes two calls, the second with the `confirm` token of the first (confirm.py).
+(create_connection, update_connection, create_entity, grant_access, pause_connection,
+create_response, create_project, invite_user, add_to_team, remove_from_team) takes two
+calls, the second with the `confirm` token of the first (confirm.py).
 """
 import difflib
 import json
@@ -379,6 +380,241 @@ def grant_access(inst, entity, role, edit=True, create=False, confirm=None):
         return first
     inst.espo.call('PUT', f'/Role/{found["id"]}', body={'data': {**data, entity: want}})
     return {'changed': True, 'role': role, 'entity': entity, 'access': want}
+
+
+# --- People, responses and projects ---------------------------------------------------------
+# Responses (CResponse) and cluster projects (CProject) are kobo-espo's (its espo/seed); an
+# instance without them gets a Refused. People are regular users only, never admins or API
+# users, with a role no API user has: the bridge's and the agents' users and roles are
+# theirs alone.
+
+USERNAME = re.compile(r'^[a-z0-9][a-z0-9_.-]{1,49}$')
+EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def has_entity(inst, entity, what):
+    if entity not in (inst.espo.call('GET', '/Metadata', {'key': 'scopes'}) or {}):
+        raise Refused(f'This EspoCRM has no {what} ({entity}).')
+
+
+def by_name_or_id(inst, entity, ref, what, listed_by):
+    ref = str(ref or '').strip()
+    rows = inst.espo.call('GET', f'/{entity}', {'maxSize': 200, 'select': 'name', 'orderBy': 'name'})['list']
+    rec = next((r for r in rows if r['id'] == ref), None) or next(
+        (r for r in rows if r['name'].casefold() == ref.casefold()), None)
+    if rec is None:
+        raise Refused(f'No {what} {ref!r}: {listed_by} lists them.')
+    return inst.espo.call('GET', f'/{entity}/{rec["id"]}')
+
+
+def team_named(inst, name):
+    found = inst.espo.find('Team', 'name', str(name).strip())
+    if not found:
+        raise Refused(f'No team {name!r}: list_teams.')
+    return found
+
+
+def person(inst, username):
+    """A regular, active user (not an admin or an API user)."""
+    found = inst.espo.find('User', 'userName', str(username).strip(), select='userName,name,type,isActive')
+    if not found:
+        raise Refused(f'No user {username!r}: list_users.')
+    if found.get('type') != 'regular':
+        raise Refused(f'{username} is {"an admin" if found.get("type") == "admin" else "not a person"}: '
+                      'these tools change regular users only.')
+    return found
+
+
+def people_roles(inst):
+    """{name: id} of the roles people can have: those no API user holds."""
+    out = {}
+    for r in inst.espo.call('GET', '/Role', {'maxSize': 200, 'select': 'name', 'orderBy': 'name'})['list']:
+        users = inst.espo.call('GET', f'/Role/{r["id"]}/users', {'maxSize': 200, 'select': 'type'})['list']
+        if not any(u.get('type') == 'api' for u in users):
+            out[r['name']] = r['id']
+    return out
+
+
+def email_ready(inst):
+    return bool((inst.espo.call('GET', '/Settings') or {}).get('smtpServer'))
+
+
+def list_roles(inst):
+    """The roles people can have (not the bridge's or the agents')."""
+    return {'roles': sorted(people_roles(inst)),
+            'note': "A person's access is the sum of their roles, in every team they're in: someone in two "
+                    'projects has the same access in both.'}
+
+
+def list_projects(inst):
+    """Responses with their cluster projects, each with its teams."""
+    has_entity(inst, 'CResponse', 'responses')
+    projects = []
+    if 'CProject' in (inst.espo.call('GET', '/Metadata', {'key': 'scopes'}) or {}):
+        projects = inst.espo.call('GET', '/CProject', {'maxSize': 200, 'orderBy': 'name',
+                                                      'select': 'name,cluster,status,responseId,leadName,teamsNames'})['list']
+    out = []
+    for r in inst.espo.call('GET', '/CResponse', {'maxSize': 200, 'orderBy': 'name',
+                                                  'select': 'name,status,leadName,teamsNames'})['list']:
+        out.append({'response': r['name'], 'status': r.get('status'), 'lead': r.get('leadName'),
+                    'teams': sorted((r.get('teamsNames') or {}).values()), 'link': inst.link('CResponse', r['id']),
+                    'projects': [{'project': p['name'], 'cluster': p.get('cluster'), 'status': p.get('status'),
+                                  'lead': p.get('leadName'), 'teams': sorted((p.get('teamsNames') or {}).values()),
+                                  'link': inst.link('CProject', p['id'])}
+                                 for p in projects if p.get('responseId') == r['id']]})
+    return {'responses': out}
+
+
+def create_response(inst, name, team=None, emergency_type=None, country=None, lead=None, confirm=None):
+    """A response, in a team of its own (made if it doesn't exist): its coordinators' team,
+    who see every one of its cluster projects."""
+    has_entity(inst, 'CResponse', 'responses')
+    name = str(name or '').strip()
+    if not name or len(name) > 100:
+        raise Refused('A response needs a name (up to 100 characters).')
+    if inst.espo.find('CResponse', 'name', name):
+        raise Refused(f'There is a response called "{name}" already: list_projects.')
+    team = str(team or f'Response: {name}').strip()[:100]
+    have_team = inst.espo.find('Team', 'name', team)
+    lead_user = person(inst, lead) if lead else None
+    facts = {'action': 'create_response', 'name': name, 'team': team, 'type': emergency_type, 'country': country,
+             'lead': lead}
+    first = gate(facts, confirm, {'would_create': {
+        'response': name, 'team': team + ('' if have_team else ' (new)'), 'emergency_type': emergency_type,
+        'country': country, 'lead': lead},
+        'note': "Its team is its coordinators': they see all its projects. It starts with four tasks for its lead."
+                + (f' {lead} is put in its team.' if lead else '')})
+    if first:
+        return first
+    try:
+        team_id = (have_team or inst.espo.call('POST', '/Team', body={'name': team}))['id']
+        if lead_user:
+            inst.espo.call('POST', f'/Team/{team_id}/users', body={'id': lead_user['id']})
+        rec = inst.espo.call('POST', '/CResponse', body={
+            'name': name, 'status': 'Active', 'teamsIds': [team_id], 'leadId': lead_user and lead_user['id'],
+            **({'emergencyType': emergency_type} if emergency_type else {}), **({'country': country} if country else {})})
+    except BridgeError as e:
+        raise failed(e) from None
+    return {'changed': True, 'response': name, 'team': team, 'link': inst.link('CResponse', rec['id']),
+            'next': 'create_project for each cluster; invite_user or add_to_team for its coordinators.'}
+
+
+def create_project(inst, response, name, cluster=None, lead=None, team=None, confirm=None):
+    """A cluster project in a response, in a team of its own (made if it doesn't exist) and
+    the response's: its sites and tasks follow it."""
+    has_entity(inst, 'CProject', 'cluster projects')
+    resp = by_name_or_id(inst, 'CResponse', response, 'response', 'list_projects')
+    name = str(name or '').strip()
+    if not name or len(name) > 100:
+        raise Refused('A project needs a name (up to 100 characters), e.g. "Emergency Telecommunications".')
+    full = f'{resp["name"]} · {name}'[:100]
+    if inst.espo.find('CProject', 'name', full):
+        raise Refused(f'There is a project called "{full}" already: list_projects.')
+    clusters = (inst.espo.call('GET', '/Metadata', {'key': 'entityDefs.CProject.fields.cluster'}) or {}).get('options') or []
+    if cluster and cluster not in clusters:
+        raise Refused(f'No cluster {cluster!r}. The clusters: {", ".join(c for c in clusters if c)}.')
+    team = str(team or f'Cluster: {full}').strip()[:100]
+    have_team = inst.espo.find('Team', 'name', team)
+    lead_user = person(inst, lead) if lead else None
+    facts = {'action': 'create_project', 'response': resp['id'], 'name': full, 'cluster': cluster, 'lead': lead,
+             'team': team}
+    first = gate(facts, confirm, {'would_create': {
+        'project': full, 'response': resp['name'], 'cluster': cluster, 'lead': lead,
+        'team': team + ('' if have_team else ' (new)')},
+        'note': f"Its records are in its team and the response's ({', '.join(sorted((resp.get('teamsNames') or {}).values()))}): "
+                "the project's people see only this project, the response's coordinators every project. To hand "
+                "out its work, a coordinator joins its team (add_to_team)."
+                + (f' {lead} is put in its team.' if lead else '')})
+    if first:
+        return first
+    try:
+        team_id = (have_team or inst.espo.call('POST', '/Team', body={'name': team}))['id']
+        if lead_user:
+            inst.espo.call('POST', f'/Team/{team_id}/users', body={'id': lead_user['id']})
+        rec = inst.espo.call('POST', '/CProject', body={
+            'name': full, 'responseId': resp['id'], 'status': 'Active', 'teamsIds': [team_id],
+            'leadId': lead_user and lead_user['id'], **({'cluster': cluster} if cluster else {})})
+    except BridgeError as e:
+        raise failed(e) from None
+    return {'changed': True, 'project': full, 'team': team, 'link': inst.link('CProject', rec['id']),
+            'next': f'invite_user (or add_to_team) the project\'s people into "{team}", each with a role (list_roles). '
+                    'A Kobo form for its sites: a connection whose site list has `team = "' + team + '"`.'}
+
+
+def invite_user(inst, username, first_name, last_name, email, role, teams, confirm=None):
+    """A new person: a regular user with a role and teams. EspoCRM emails them a link to
+    set their password (when its outgoing email is set up). No password passes through here."""
+    username = str(username or '').strip()
+    if not USERNAME.match(username):
+        raise Refused('The username: lowercase letters, digits, ".", "_" or "-", 2 to 50 of them.')
+    email = str(email or '').strip()
+    if not EMAIL.match(email):
+        raise Refused('An email address is needed: EspoCRM sends the sign-in link there.')
+    if not str(last_name or '').strip():
+        raise Refused('A last name is needed.')
+    if inst.espo.find('User', 'userName', username):
+        raise Refused(f'There is a user {username} already: add_to_team.')
+    if inst.espo.find('User', 'emailAddress', email):
+        raise Refused(f'A user has {email} already: list_users.')
+    roles = people_roles(inst)
+    if role not in roles:
+        raise Refused(f'No role {role!r} for people. The roles: {", ".join(sorted(roles))}.')
+    teams = [teams] if isinstance(teams, str) else list(teams or [])
+    if not teams:
+        raise Refused('At least one team: a project\'s, or a response\'s (list_projects, list_teams).')
+    team_ids = [team_named(inst, t)['id'] for t in teams]
+    send = email_ready(inst)
+    facts = {'action': 'invite_user', 'user': username, 'name': [first_name, last_name], 'email': email,
+             'role': role, 'teams': teams}
+    first = gate(facts, confirm, {'would_create': {
+        'user': username, 'name': f'{first_name or ""} {last_name}'.strip(), 'email': email, 'role': role,
+        'teams': teams},
+        'email': f'EspoCRM emails {email} a link to set their password.' if send else
+                 "EspoCRM's outgoing email isn't set up: no email goes out. The account exists, but nobody "
+                 'knows its password until an admin sets one (Administration, Users) or email is set up.'})
+    if first:
+        return first
+    try:
+        rec = inst.espo.call('POST', '/User', body={
+            'userName': username, 'firstName': str(first_name or '').strip(), 'lastName': str(last_name).strip(),
+            'emailAddress': email, 'type': 'regular', 'isActive': True, 'rolesIds': [roles[role]],
+            'teamsIds': team_ids, 'defaultTeamId': team_ids[0], 'sendAccessInfo': send})
+    except BridgeError as e:
+        raise failed(e) from None
+    return {'changed': True, 'user': username, 'role': role, 'teams': teams, 'emailed': send,
+            'link': inst.link('User', rec['id'])}
+
+
+def add_to_team(inst, user, team, confirm=None):
+    """Puts a person in a team (a project's or a response's): they see its records, with their role's access."""
+    who, t = person(inst, user), team_named(inst, team)
+    teams = (inst.espo.call('GET', f'/User/{who["id"]}') or {}).get('teamsIds') or []
+    if t['id'] in teams:
+        return {'changed': False, 'note': f'{who["userName"]} is in {t["name"]} already.'}
+    facts = {'action': 'add_to_team', 'user': who['id'], 'team': t['id']}
+    first = gate(facts, confirm, {'would_add': who['userName'], 'to_team': t['name'],
+                                  'note': "They see the team's records at once, with their role's access."})
+    if first:
+        return first
+    inst.espo.call('POST', f'/Team/{t["id"]}/users', body={'id': who['id']})
+    return {'changed': True, 'user': who['userName'], 'team': t['name']}
+
+
+def remove_from_team(inst, user, team, confirm=None):
+    """Takes a person out of a team. Tasks assigned to them or shared with them stay
+    readable to them until they're given to someone else (EspoCRM's "own" access)."""
+    who, t = person(inst, user), team_named(inst, team)
+    teams = (inst.espo.call('GET', f'/User/{who["id"]}') or {}).get('teamsIds') or []
+    if t['id'] not in teams:
+        return {'changed': False, 'note': f'{who["userName"]} is not in {t["name"]}.'}
+    facts = {'action': 'remove_from_team', 'user': who['id'], 'team': t['id']}
+    first = gate(facts, confirm, {'would_remove': who['userName'], 'from_team': t['name'],
+                                  'note': 'Their own tasks stay readable to them until reassigned; closing a project '
+                                          'or response gives its tasks to its lead.'})
+    if first:
+        return first
+    inst.espo.call('DELETE', f'/Team/{t["id"]}/users', body={'id': who['id']})
+    return {'changed': True, 'user': who['userName'], 'removed_from': t['name']}
 
 
 # --- Testing -------------------------------------------------------------------------------

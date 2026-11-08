@@ -148,6 +148,9 @@ class Espo:
             if params.get('where[0][type]') == 'in':
                 wanted = [v for k, v in params.items() if k.startswith('where[0][value]')]
                 rows = [r for r in rows if r.get(params['where[0][attribute]']) in wanted]
+            if params.get('where[1][type]') == 'in':  # escalation: this connection's forms
+                wanted = [v for k, v in params.items() if k.startswith('where[1][value]')]
+                rows = [r for r in rows if r.get(params['where[1][attribute]']) in wanted]
             if params.get('where[1][type]') == 'linkedWith':
                 rows = [r for r in rows if params['where[1][value][0]'] in r.get('teamsIds', [])]
             off = params.get('offset', 0)
@@ -245,11 +248,14 @@ class Escalation(unittest.TestCase):
         espo = Espo()
         espo.rows['Case'] = [{'id': 'k1', 'teamsIds': ['t-a'], 'cKoboAsset': 'aX', 'status': 'New'},
                              {'id': 'k2', 'teamsIds': ['t-a'], 'cKoboAsset': 'aX', 'assignedUserId': 'u1'},
-                             {'id': 'k3', 'teamsIds': ['t-a'], 'cKoboAsset': 'aX', 'status': 'Closed'}]
-        self.assertEqual(bridge.escalate(t, espo, ledger, now=10_000), 1)
-        self.assertEqual(espo.notes[0]['parentId'], 'k1')
+                             {'id': 'k3', 'teamsIds': ['t-a'], 'cKoboAsset': 'aX', 'status': 'Closed'},
+                             # another connection's form: left to that connection
+                             {'id': 'k4', 'teamsIds': ['t-a'], 'cKoboAsset': 'aOther', 'status': 'New'}]
+        self.assertEqual(bridge.escalate(t, espo, ledger, now=10_000, uids={'aX'}), 1)
+        self.assertEqual([n['parentId'] for n in espo.notes], ['k1'])
         self.assertTrue(espo.notes[0]['post'].endswith('@lead-a'))
-        self.assertEqual(bridge.escalate(t, espo, ledger, now=20_000), 0)
+        self.assertEqual(bridge.escalate(t, espo, ledger, now=20_000, uids={'aX'}), 0)
+        self.assertEqual(bridge.escalate(t, espo, ledger, now=20_000, uids=set()), 0)
 
 
 class Lists(unittest.TestCase):

@@ -222,6 +222,14 @@ preview of its latest submission), `preview_template`, `create_connection`,
 then shows the record) and `connection_status`. A prompt, **Connect a Kobo form to
 EspoCRM**, has the steps.
 
+It also sets up a response and its people, where the instance has responses and cluster
+projects (kobo-espo's `CResponse`, `CProject`): `list_projects`, `create_response`,
+`create_project` (each with a team of its own), `list_roles`, `invite_user` (a regular
+user with a role and teams; EspoCRM emails them a link to set their password when its
+outgoing email is set up, and no password passes through the MCP), `add_to_team` and
+`remove_from_team`. They never touch admins or API users, or the bridge's and agents'
+roles. A prompt, **Set up a response**, has the steps.
+
 - **Only EspoCRM admins.** They connect in one of two ways, and every call checks the user
   is still an active admin, so taking away someone's admin rights ends their access within
   a minute:

@@ -891,8 +891,9 @@ def apply_edit(t, sub, kobo_url, uid, teams, espo, espo_ed, counts):
     print(f'edit of submission {sub["_id"]} of {uid} -> case {case["id"]}')
 
 
-def push_status(t, espo, kobo, ledger):
-    """Cases changed since the last pass: their status onto the Kobo submission."""
+def push_status(t, espo, kobo, ledger, uids):
+    """Cases changed since the last pass: their status onto the Kobo submission. Only the
+    cases of this connection's forms (uids): another connection's are its own."""
     mapping = (t.get('kobo_status') or {}).get('map') or {}
     if not mapping:
         return 0
@@ -904,7 +905,7 @@ def push_status(t, espo, kobo, ledger):
     pushed = 0
     for c in page['list']:
         want, key = mapping.get(c.get('status')), f'vs:{c["id"]}'
-        if want and c.get('cKoboAsset') and c.get('cKoboSubmissionId') and ledger.seen_value(key) != want:
+        if want and c.get('cKoboAsset') in uids and c.get('cKoboSubmissionId') and ledger.seen_value(key) != want:
             try:
                 kobo.set_validation(c['cKoboAsset'], c['cKoboSubmissionId'], want)
                 pushed += 1
@@ -986,11 +987,12 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
         counts['notified'] += 1
 
 
-def escalate(t, espo, ledger, now):
-    """[escalation]: records from Kobo still unassigned after_hours after they came in get
-    a note @mentioning their routes' `escalate` users, once."""
+def escalate(t, espo, ledger, now, uids):
+    """[escalation]: records from this connection's forms (uids) still unassigned
+    after_hours after they came in get a note @mentioning their routes' `escalate` users,
+    once. Another connection's records are left to it: its routes, its wait."""
     esc = t.get('escalation')
-    if not esc:
+    if not esc or not uids:
         return 0
     by_team = {}
     for r in t['route']:
@@ -999,7 +1001,8 @@ def escalate(t, espo, ledger, now):
     before = datetime.fromtimestamp(now - float(esc['after_hours']) * 3600, timezone.utc)
     page = espo.call('GET', f'/{t["entity"]}', {
         'where[0][type]': 'isNull', 'where[0][attribute]': 'assignedUserId',
-        'where[1][type]': 'isNotNull', 'where[1][attribute]': 'cKoboAsset',
+        'where[1][type]': 'in', 'where[1][attribute]': 'cKoboAsset',
+        **{f'where[1][value][{i}]': uid for i, uid in enumerate(sorted(uids))},
         'where[2][type]': 'before', 'where[2][attribute]': 'createdAt',
         'where[2][value]': before.strftime('%Y-%m-%d %H:%M:%S'),
         'select': 'id,teamsIds,status', 'orderBy': 'createdAt', 'order': 'asc', 'maxSize': 200})
@@ -1170,7 +1173,7 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
                 if sub is not None and attempt(uid, sub):
                     ledger.set_seen(key, sub_uuid)
     t = base
-    counts['statuses'] = push_status(t, espo, kobo, ledger)
+    counts['statuses'] = push_status(t, espo, kobo, ledger, set(projects))
     for uid, version in fu_projects.items():
         labels = {q: opts for q, (_, opts) in form_choices(kobo.form(uid, version), t.get('language')).items()}
 
@@ -1196,7 +1199,7 @@ def sync_once(t, kobo, espo, kobo_url, ledger, now=None, forms=None, espo_fu=Non
     if fu_projects and t['followup'].get('list'):
         counts['lists'] = sync_open_cases(t, kobo, espo, ledger, now, list_min_seconds)
     counts['lists'] += sync_lists(t, kobo, espo, ledger, now, list_min_seconds, teams)
-    counts['escalated'] = escalate(t, espo, ledger, now)
+    counts['escalated'] = escalate(t, espo, ledger, now, set(projects))
     return counts
 
 

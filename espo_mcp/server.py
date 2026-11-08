@@ -51,9 +51,15 @@ Start with bridge_info: it names the Kobo server and the bridge's Kobo account, 
 form must be shared with (kobo-mcp share_project, "View submissions"). The prompt
 "Connect a Kobo form to EspoCRM" has the steps. propose_connection writes nothing: show
 the user its questions table, what was left out and why, its warnings, and the preview,
-and change the template as they ask (preview_template shows the result). Every change
-(create_connection, update_connection, create_entity, grant_access, pause_connection)
-takes two calls: the first shows what would happen and returns a `confirm` token; show
+and change the template as they ask (preview_template shows the result).
+
+They also set up a response and its people: create_response, create_project (a cluster's
+work in it, with its own team), invite_user, add_to_team, remove_from_team (the prompt
+"Set up a response"). People are regular users only; their access is their role
+(list_roles), in the teams they're in. Every change
+(create_connection, update_connection, create_entity, grant_access, pause_connection,
+create_response, create_project, invite_user, add_to_team, remove_from_team) takes two
+calls: the first shows what would happen and returns a `confirm` token; show
 the user exactly that, and call again with the token only once they have agreed. Never
 pass a token on the strength of an earlier, vaguer instruction. There is no delete: pause
 a connection instead. Never ask for passwords or tokens in the chat."""
@@ -77,7 +83,25 @@ Help me connect a Kobo form to EspoCRM{about}.
 6. A test: kobo-mcp create_submissions with one dummy entry, then test_connection, and
    show me the record it made (its link).
 7. grant_access for the roles of the people who'll work on these records (team level),
-   and tell me what's left by hand: giving people the team in EspoCRM."""
+   and add_to_team (or invite_user) for the people who'll work on them."""
+
+RESPONSE = """\
+Help me set up a response in EspoCRM{about}, with a project for each cluster we support and
+the people who work on them.
+
+1. list_projects: is the response there already? If not, create_response (ask me its
+   name, emergency type, country and lead). Its team is for its coordinators: they see
+   every project.
+2. For each cluster, one at a time: create_project (its name, cluster and lead). Each has a
+   team of its own.
+3. The people, project by project: list_roles, then for each person invite_user with the
+   project's team and a role (Cluster Lead, Cluster Partner, Cluster Viewer...), or
+   add_to_team if they have an account. Ask me for their names and emails; never for
+   passwords. Tell me whether EspoCRM emailed them (invite_user says).
+4. Remind me: someone's access is their role in every team they're in, so a person who
+   leads one project and only views another needs a role that suits both, or two accounts.
+5. Their Kobo forms: the prompt "Connect a Kobo form to EspoCRM", with sites in the
+   project (a site list with the project's team)."""
 
 
 def run_tool(fn):
@@ -227,6 +251,66 @@ def build_server(inst=None, public_url=None, env=os.environ):
         """Lets a role's users see (and edit) the records of their own teams, never all. Two calls."""
         return tools.grant_access(inst, entity, role, edit, create, confirm)
 
+    @tool(READ)
+    def list_roles() -> dict:
+        """The roles people can have (not the bridge's or the agents')."""
+        return tools.list_roles(inst)
+
+    @tool(READ)
+    def list_projects() -> dict:
+        """The responses, each with its cluster projects and their teams."""
+        return tools.list_projects(inst)
+
+    @tool(CHANGE)
+    def create_response(name: Annotated[str, Field(description='e.g. "Hurricane Melissa Response".')],
+                        team: Annotated[str | None, Field(description='Its coordinators\' team (made if new); '
+                                                                      'default "Response: <name>".')] = None,
+                        emergency_type: Annotated[str | None, Field(description='Earthquake, Flood, Cyclone, Drought, '
+                                                                                'Conflict, Epidemic or Other.')] = None,
+                        country: Annotated[str | None, Field(description='The country.')] = None,
+                        lead: Annotated[str | None, Field(description='Its lead: a username (list_users).')] = None,
+                        confirm: Confirm = None) -> dict:
+        """A response, in its coordinators' team, who see all its projects. Two calls."""
+        return tools.create_response(inst, name, team, emergency_type, country, lead, confirm)
+
+    @tool(CHANGE)
+    def create_project(response: Annotated[str, Field(description='The response: its name or id (list_projects).')],
+                       name: Annotated[str, Field(description='e.g. "ETC"; the project is called "<response> · <name>".')],
+                       cluster: Annotated[str | None, Field(description='e.g. Emergency Telecommunications, WASH, '
+                                                                        'Shelter, Health, Logistics.')] = None,
+                       lead: Annotated[str | None, Field(description='Its lead: a username (list_users).')] = None,
+                       team: Annotated[str | None, Field(description='Its team (made if new); default '
+                                                                     '"Cluster: <project>".')] = None,
+                       confirm: Confirm = None) -> dict:
+        """A cluster project in a response, with a team of its own: its people see only it. Two calls."""
+        return tools.create_project(inst, response, name, cluster, lead, team, confirm)
+
+    @tool(CHANGE)
+    def invite_user(username: Annotated[str, Field(description='Lowercase, e.g. "amina.k".')],
+                    first_name: Annotated[str, Field(description='First name.')],
+                    last_name: Annotated[str, Field(description='Last name.')],
+                    email: Annotated[str, Field(description='Where EspoCRM sends the link to set a password.')],
+                    role: Annotated[str, Field(description='A role for people (list_roles).')],
+                    teams: Annotated[list[str], Field(description="Their teams: a project's, a response's.")],
+                    confirm: Confirm = None) -> dict:
+        """A new person (a regular user) with a role and teams; EspoCRM emails them a link to set their password,
+        when its outgoing email is set up. Never ask for or pass a password. Two calls."""
+        return tools.invite_user(inst, username, first_name, last_name, email, role, teams, confirm)
+
+    @tool(CHANGE)
+    def add_to_team(user: Annotated[str, Field(description='A username (list_users).')],
+                    team: Annotated[str, Field(description="A project's or a response's team (list_projects).")],
+                    confirm: Confirm = None) -> dict:
+        """Puts a person in a team: they see its records, with their role's access. Two calls."""
+        return tools.add_to_team(inst, user, team, confirm)
+
+    @tool(CHANGE)
+    def remove_from_team(user: Annotated[str, Field(description='A username (list_users).')],
+                         team: Annotated[str, Field(description='The team.')],
+                         confirm: Confirm = None) -> dict:
+        """Takes a person out of a team (their own tasks stay readable to them until reassigned). Two calls."""
+        return tools.remove_from_team(inst, user, team, confirm)
+
     @tool(WAIT)
     def test_connection(connection: Connection,
                         wait_seconds: Annotated[int, Field(ge=10, le=240, description='How long to wait for a pass.')]
@@ -245,6 +329,13 @@ def build_server(inst=None, public_url=None, env=os.environ):
         return CONNECT.format(about=f' ({form})' if form else '')
 
     server.prompt(name='connect_a_form', title='Connect a Kobo form to EspoCRM')(connect_a_form)
+
+    def set_up_a_response(response: Annotated[str | None, Field(description='The response, if you know it.')] = None
+                          ) -> str:
+        """Set up a response, its cluster projects and their people."""
+        return RESPONSE.format(about=f' ({response})' if response else '')
+
+    server.prompt(name='set_up_a_response', title='Set up a response')(set_up_a_response)
     return server, public_url
 
 
