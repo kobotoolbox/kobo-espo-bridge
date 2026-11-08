@@ -274,7 +274,7 @@ def build_server(inst=None, public_url=None, env=os.environ):
         return tools.create_response(inst, name, team, emergency_type, country, lead, confirm)
 
     @tool(CHANGE)
-    def create_project(response: Annotated[str, Field(description='The response: its name or id (list_projects).')],
+    def create_project(response: Annotated[str, Field(description='The response: its code (RSP-...), name or id (list_projects).')],
                        name: Annotated[str, Field(description='e.g. "ETC"; the project is called "<response> · <name>".')],
                        cluster: Annotated[str | None, Field(description='e.g. Emergency Telecommunications, WASH, '
                                                                         'Shelter, Health, Logistics.')] = None,

@@ -398,9 +398,12 @@ def has_entity(inst, entity, what):
 
 
 def by_name_or_id(inst, entity, ref, what, listed_by):
+    """A record by its id, its short code (e.g. RSP-7K3Q, where the instance has codes) or its name."""
     ref = str(ref or '').strip()
-    rows = inst.espo.call('GET', f'/{entity}', {'maxSize': 200, 'select': 'name', 'orderBy': 'name'})['list']
-    rec = next((r for r in rows if r['id'] == ref), None) or next(
+    has_code = 'code' in (inst.espo.call('GET', '/Metadata', {'key': f'entityDefs.{entity}.fields'}) or {})
+    rows = inst.espo.call('GET', f'/{entity}', {'maxSize': 200, 'select': 'name' + (',code' if has_code else ''),
+                                                 'orderBy': 'name'})['list']
+    rec = next((r for r in rows if ref in (r['id'], r.get('code'))), None) or next(
         (r for r in rows if r['name'].casefold() == ref.casefold()), None)
     if rec is None:
         raise Refused(f'No {what} {ref!r}: {listed_by} lists them.')
@@ -452,13 +455,14 @@ def list_projects(inst):
     projects = []
     if 'CProject' in (inst.espo.call('GET', '/Metadata', {'key': 'scopes'}) or {}):
         projects = inst.espo.call('GET', '/CProject', {'maxSize': 200, 'orderBy': 'name',
-                                                      'select': 'name,cluster,status,responseId,leadName,teamsNames'})['list']
+                                                      'select': 'name,code,cluster,status,responseId,leadName,teamsNames'})['list']
     out = []
     for r in inst.espo.call('GET', '/CResponse', {'maxSize': 200, 'orderBy': 'name',
-                                                  'select': 'name,status,leadName,teamsNames'})['list']:
-        out.append({'response': r['name'], 'status': r.get('status'), 'lead': r.get('leadName'),
+                                                  'select': 'name,code,status,leadName,teamsNames'})['list']:
+        out.append({'response': r['name'], 'code': r.get('code'), 'status': r.get('status'), 'lead': r.get('leadName'),
                     'teams': sorted((r.get('teamsNames') or {}).values()), 'link': inst.link('CResponse', r['id']),
-                    'projects': [{'project': p['name'], 'cluster': p.get('cluster'), 'status': p.get('status'),
+                    'projects': [{'project': p['name'], 'code': p.get('code'), 'cluster': p.get('cluster'),
+                                  'status': p.get('status'),
                                   'lead': p.get('leadName'), 'teams': sorted((p.get('teamsNames') or {}).values()),
                                   'link': inst.link('CProject', p['id'])}
                                  for p in projects if p.get('responseId') == r['id']]})
@@ -510,9 +514,15 @@ def create_project(inst, response, name, cluster=None, lead=None, team=None, con
     full = f'{resp["name"]} · {name}'[:100]
     if inst.espo.find('CProject', 'name', full):
         raise Refused(f'There is a project called "{full}" already: list_projects.')
-    clusters = (inst.espo.call('GET', '/Metadata', {'key': 'entityDefs.CProject.fields.cluster'}) or {}).get('options') or []
-    if cluster and cluster not in clusters:
-        raise Refused(f'No cluster {cluster!r}. The clusters: {", ".join(c for c in clusters if c)}.')
+    if cluster:  # its code (etc) or its label (Emergency Telecommunications)
+        defs = inst.espo.call('GET', '/Metadata', {'key': 'entityDefs.CProject.fields.cluster'}) or {}
+        # The labels are in EspoCRM's translations, not the field's metadata
+        names = ((inst.espo.call('GET', '/I18n') or {}).get('CProject', {}).get('options') or {}).get('cluster') or {}
+        labels = {o: names.get(o) or o for o in defs.get('options') or [] if o}
+        code = next((o for o, lab in labels.items() if str(cluster).strip().casefold() in (o.casefold(), lab.casefold())), None)
+        if code is None:
+            raise Refused(f'No cluster {cluster!r}. The clusters: {", ".join(f"{lab} ({o})" for o, lab in labels.items())}.')
+        cluster = code
     team = str(team or f'Cluster: {full}').strip()[:100]
     have_team = inst.espo.find('Team', 'name', team)
     lead_user = person(inst, lead) if lead else None
