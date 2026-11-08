@@ -5,8 +5,9 @@ dicts. A tool that can't do what it was asked raises Refused with a message for 
 
 Task-shaped, not raw access: no tool reads or writes arbitrary records. Every change
 (create_connection, update_connection, create_entity, grant_access, pause_connection,
-create_response, create_project, invite_user, add_to_team, remove_from_team) takes two
-calls, the second with the `confirm` token of the first (confirm.py).
+create_response, create_project, invite_user, add_to_team, remove_from_team,
+create_dashboard_feed, remove_dashboard_feed) takes two calls, the second with the
+`confirm` token of the first (confirm.py).
 """
 import difflib
 import json
@@ -625,6 +626,122 @@ def remove_from_team(inst, user, team, confirm=None):
         return first
     inst.espo.call('DELETE', f'/Team/{t["id"]}/users', body={'id': who['id']})
     return {'changed': True, 'user': who['userName'], 'removed_from': t['name']}
+
+
+# --- Dashboard feeds (kobo-dash) -----------------------------------------------------------
+# kobo-dash reads EspoCRM records through an API user whose key the owner pastes into its
+# admin page (kobo-dash plans/espo-source-plan.md). Each such user reads one entity's
+# records of one team (a response's or a cluster project's), only the fields chosen, and
+# writes nothing: what a dashboard can show is decided here. Never people's records.
+
+FEED_PREFIX = 'dash-'
+NOT_FOR_DASHBOARDS = {'Contact', 'User', 'Lead', 'CFocalPoint', 'Email', 'Note', 'Attachment'}
+FEED_TYPES = {'varchar', 'text', 'url', 'wysiwyg', 'int', 'float', 'currency', 'autoincrement', 'date',
+              'datetime', 'datetimeOptional', 'enum', 'multiEnum', 'array', 'checklist', 'bool', 'link'}
+ALWAYS = {'id', 'name', 'createdAt', 'modifiedAt'}
+
+
+def feed_scope(inst, scope):
+    """(label, code, the team the feed reads): a cluster project's own team, or a
+    response's (its coordinators': all its projects)."""
+    has_project = 'CProject' in (inst.espo.call('GET', '/Metadata', {'key': 'scopes'}) or {})
+    for entity, what in (('CProject', 'cluster project'), ('CResponse', 'response')):
+        if entity == 'CProject' and not has_project:
+            continue
+        try:
+            rec = by_name_or_id(inst, entity, scope, what, 'list_projects')
+        except Refused:
+            continue
+        teams = set(rec.get('teamsIds') or [])
+        if entity == 'CProject' and rec.get('responseId'):
+            teams -= set(inst.espo.call('GET', f'/CResponse/{rec["responseId"]}').get('teamsIds') or [])
+        if len(teams) != 1:
+            raise Refused(f'{rec["name"]} is in {len(teams)} teams of its own: a feed reads one.')
+        team_id = teams.pop()
+        name = (rec.get('teamsNames') or {}).get(team_id) or team_id
+        return rec['name'], rec.get('code') or rec['id'], team_id, name
+    raise Refused(f'No response or cluster project {scope!r}: list_projects.')
+
+
+def create_dashboard_feed(inst, scope, entity, fields, confirm=None):
+    """An API user for kobo-dash: it reads only `entity`'s records in the scope's team, and
+    only these fields; it writes nothing. Two calls."""
+    entity = str(entity or '').strip()
+    if entity in NOT_FOR_DASHBOARDS or entity in OFF_LIMITS:
+        raise Refused(f'{entity} holds people or setup, not for dashboards (their viewers aren\'t EspoCRM\'s teams).')
+    defs = inst.espo.call('GET', '/Metadata', {'key': f'entityDefs.{entity}.fields'}) or {}
+    if not defs:
+        raise Refused(f'No entity {entity!r}: list_entities.')
+    fields = [str(f).strip() for f in (fields or []) if str(f).strip()]
+    if not fields:
+        raise Refused('Name the fields the dashboard needs (no more: they reach its viewers).')
+    for f in fields:
+        if f not in defs:
+            raise Refused(f'{entity} has no field {f!r}.')
+        if defs[f].get('type') not in FEED_TYPES:
+            raise Refused(f'{f} is a {defs[f].get("type")} field: not for dashboards.')
+    label, code, team_id, team_name = feed_scope(inst, scope)
+    user_name = re.sub(r'[^a-z0-9-]', '', f'{FEED_PREFIX}{code}-{entity}'.lower())[:50]
+    role_name = f'Dashboard feed: {label} · {entity}'[:100]
+    if inst.espo.find('User', 'userName', user_name):
+        raise Refused(f'There is a feed user {user_name} already: remove_dashboard_feed first to change it.')
+    hidden = sorted(f for f in defs if f not in set(fields) | ALWAYS)
+    facts = {'action': 'create_dashboard_feed', 'user': user_name, 'team': team_id, 'entity': entity,
+             'fields': sorted(fields)}
+    first = gate(facts, confirm, {'would_create': {
+        'api_user': user_name, 'reads': f'{entity} records of the team {team_name}', 'fields': sorted(set(fields) | {'name'}),
+        'writes': 'nothing'},
+        'note': "Dashboards show what this user reads to anyone their link or password reaches: EspoCRM's "
+                'teams no longer apply there. Keep personal data out.'})
+    if first:
+        return first
+    spec = {'name': role_name, 'data': {entity: {'create': 'no', 'read': 'team', 'edit': 'no', 'delete': 'no',
+                                                 'stream': 'no'}},
+            'fieldData': {entity: {f: {'read': 'no', 'edit': 'no'} for f in hidden}},
+            'assignmentPermission': 'no', 'userPermission': 'no', 'mentionPermission': 'no',
+            'exportPermission': 'no', 'massUpdatePermission': 'no', 'portalPermission': 'no',
+            'groupEmailAccountPermission': 'no', 'dataPrivacyPermission': 'no'}
+    try:
+        role = inst.espo.call('POST', '/Role', body=spec)
+        user = inst.espo.call('POST', '/User', body={
+            'userName': user_name, 'type': 'api', 'authMethod': 'ApiKey', 'isActive': True,
+            'rolesIds': [role['id']], 'teamsIds': [team_id], 'defaultTeamId': team_id})
+    except BridgeError as e:
+        raise failed(e) from None
+    return {'changed': True, 'api_user': user_name, 'reads': f'{entity} of {team_name}', 'fields': fields,
+            'its_key': f'{inst.site_url}/#ApiUser/view/{user["id"]} (an admin sees it there)',
+            'next': 'Ask the owner to open that page, copy the API key, and paste it into the dashboards admin '
+                    f'page (EspoCRM card) with the address {inst.site_url}. Never ask for the key in the chat. Then '
+                    f'kobo-mcp create_espo_feed with entity {entity} and these fields.'}
+
+
+def list_dashboard_feeds(inst):
+    """The API users made for dashboards, with what each reads."""
+    rows = inst.espo.call('GET', '/User', {'maxSize': 200, 'select': 'userName,type,teamsNames,rolesNames,isActive',
+                                           'where[0][type]': 'startsWith', 'where[0][attribute]': 'userName',
+                                           'where[0][value]': FEED_PREFIX})['list']
+    return {'feeds': [{'api_user': r['userName'], 'active': r.get('isActive'),
+                       'team': sorted((r.get('teamsNames') or {}).values()),
+                       'role': sorted((r.get('rolesNames') or {}).values())}
+                      for r in rows if r.get('type') == 'api']}
+
+
+def remove_dashboard_feed(inst, api_user, confirm=None):
+    """Removes a dashboard feed's API user and its role: kobo-dash's feed stops reading."""
+    user = inst.espo.find('User', 'userName', str(api_user).strip(), select='userName,type')
+    if not user or user.get('type') != 'api' or not user['userName'].startswith(FEED_PREFIX):
+        raise Refused(f'No dashboard feed user {api_user!r}: list_dashboard_feeds.')
+    full = inst.espo.call('GET', f'/User/{user["id"]}')
+    facts = {'action': 'remove_dashboard_feed', 'user': user['id']}
+    first = gate(facts, confirm, {'would_remove': user['userName'],
+                                  'note': "kobo-dash's feed of it stops updating; its table keeps the last rows."})
+    if first:
+        return first
+    inst.espo.call('DELETE', f'/User/{user["id"]}')
+    for role_id in full.get('rolesIds') or []:
+        if (inst.espo.call('GET', f'/Role/{role_id}') or {}).get('name', '').startswith('Dashboard feed: '):
+            inst.espo.call('DELETE', f'/Role/{role_id}')
+    return {'changed': True, 'removed': user['userName']}
 
 
 # --- Testing -------------------------------------------------------------------------------

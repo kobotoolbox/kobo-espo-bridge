@@ -58,8 +58,8 @@ work in it, with its own team), invite_user, add_to_team, remove_from_team (the 
 "Set up a response"). People are regular users only; their access is their role
 (list_roles), in the teams they're in. Every change
 (create_connection, update_connection, create_entity, grant_access, pause_connection,
-create_response, create_project, invite_user, add_to_team, remove_from_team) takes two
-calls: the first shows what would happen and returns a `confirm` token; show
+create_response, create_project, invite_user, add_to_team, remove_from_team,
+create_dashboard_feed, remove_dashboard_feed) takes two calls: the first shows what would happen and returns a `confirm` token; show
 the user exactly that, and call again with the token only once they have agreed. Never
 pass a token on the strength of an earlier, vaguer instruction. There is no delete: pause
 a connection instead. Never ask for passwords or tokens in the chat."""
@@ -310,6 +310,29 @@ def build_server(inst=None, public_url=None, env=os.environ):
                          confirm: Confirm = None) -> dict:
         """Takes a person out of a team (their own tasks stay readable to them until reassigned). Two calls."""
         return tools.remove_from_team(inst, user, team, confirm)
+
+    @tool(CHANGE)
+    def create_dashboard_feed(
+            scope: Annotated[str, Field(description="Whose records: a cluster project's or a response's code or name "
+                                                    "(list_projects). A project's feed reads that project only.")],
+            entity: Annotated[str, Field(description='The records, e.g. CSite, CActivity, CActivityLocation.')],
+            fields: Annotated[list[str], Field(description='Only the fields the dashboard needs, e.g. ["status", '
+                                                           '"latitude", "longitude"] (name is always there).')],
+            confirm: Confirm = None) -> dict:
+        """An API user for a kobo-dash dashboard: it reads only these records of that team, only these fields,
+        and writes nothing. The owner copies its key into the dashboards admin page; never ask for it. Two calls."""
+        return tools.create_dashboard_feed(inst, scope, entity, fields, confirm)
+
+    @tool(READ)
+    def list_dashboard_feeds() -> dict:
+        """The API users made for dashboards, with the team and role of each."""
+        return tools.list_dashboard_feeds(inst)
+
+    @tool(CHANGE)
+    def remove_dashboard_feed(api_user: Annotated[str, Field(description='Its API user (list_dashboard_feeds).')],
+                              confirm: Confirm = None) -> dict:
+        """Removes a dashboard feed's API user and role: the dashboard's feed stops updating. Two calls."""
+        return tools.remove_dashboard_feed(inst, api_user, confirm)
 
     @tool(WAIT)
     def test_connection(connection: Connection,
