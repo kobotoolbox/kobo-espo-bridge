@@ -440,7 +440,12 @@ def people_roles(inst):
 
 
 def email_ready(inst):
-    return bool((inst.espo.call('GET', '/Settings') or {}).get('smtpServer'))
+    """EspoCRM sends its own emails (access info, notifications) through the group email
+    account whose address is the system's from address, active and with SMTP on (the
+    Settings' smtp fields alone aren't used)."""
+    address = (inst.espo.call('GET', '/Settings') or {}).get('outboundEmailFromAddress')
+    account = address and inst.espo.find('InboundEmail', 'emailAddress', address, select='status,useSmtp')
+    return bool(account and account.get('status') == 'Active' and account.get('useSmtp'))
 
 
 def list_roles(inst):
