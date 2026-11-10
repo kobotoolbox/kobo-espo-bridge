@@ -58,7 +58,7 @@ work in it, with its own team), invite_user, add_to_team, remove_from_team (the 
 "Set up a response"). People are regular users only; their access is their role
 (list_roles), in the teams they're in. Every change
 (create_connection, update_connection, create_entity, grant_access, pause_connection,
-create_response, create_project, invite_user, add_to_team, remove_from_team,
+create_response, create_project, invite_user, invite_portal_user, add_to_team, remove_from_team,
 create_dashboard_feed, remove_dashboard_feed) takes two calls: the first shows what would happen and returns a `confirm` token; show
 the user exactly that, and call again with the token only once they have agreed. Never
 pass a token on the strength of an earlier, vaguer instruction. There is no delete: pause
@@ -296,6 +296,15 @@ def build_server(inst=None, public_url=None, env=os.environ):
         """A new person (a regular user) with a role and teams; EspoCRM emails them a link to set their password,
         when its outgoing email is set up. Never ask for or pass a password. Two calls."""
         return tools.invite_user(inst, username, first_name, last_name, email, role, teams, confirm)
+
+    @tool(CHANGE)
+    def invite_portal_user(contact: Annotated[str, Field(description="The contact: its email address or id (e.g. a CSO's focal point).")],
+                           portal: Annotated[str, Field(description='The portal, by name, e.g. "CSO portal".')],
+                           role: Annotated[str, Field(description='The portal role, by name, e.g. "CSO portal".')],
+                           confirm: Confirm = None) -> dict:
+        """A contact's login to a portal, seeing what belongs to its Account (e.g. a CSO's focal point to the CSO
+        portal); EspoCRM emails them a link to set their password. Never ask for or pass a password. Two calls."""
+        return tools.invite_portal_user(inst, contact, portal, role, confirm)
 
     @tool(CHANGE)
     def add_to_team(user: Annotated[str, Field(description='A username (list_users).')],

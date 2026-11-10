@@ -5,8 +5,8 @@ dicts. A tool that can't do what it was asked raises Refused with a message for 
 
 Task-shaped, not raw access: no tool reads or writes arbitrary records. Every change
 (create_connection, update_connection, create_entity, grant_access, pause_connection,
-create_response, create_project, invite_user, add_to_team, remove_from_team,
-create_dashboard_feed, remove_dashboard_feed) takes two calls, the second with the
+create_response, create_project, invite_user, invite_portal_user, add_to_team,
+remove_from_team, create_dashboard_feed, remove_dashboard_feed) takes two calls, the second with the
 `confirm` token of the first (confirm.py).
 """
 import difflib
@@ -598,6 +598,62 @@ def invite_user(inst, username, first_name, last_name, email, role, teams, confi
     except BridgeError as e:
         raise failed(e) from None
     return {'changed': True, 'user': username, 'role': role, 'teams': teams, 'emailed': send,
+            'link': inst.link('User', rec['id'])}
+
+
+def invite_portal_user(inst, contact, portal, role, confirm=None):
+    """A contact's login to a portal (e.g. a CSO's focal point to the CSO portal): a portal
+    user for that contact, with its Accounts (what a portal role's "account" level checks)
+    and the portal role. EspoCRM emails them a link to set their password. No password
+    passes through here. The contact is its id or its email address."""
+    ref = str(contact or '').strip()
+    c = (inst.espo.find('Contact', 'emailAddress', ref.lower(), select='id,name,firstName,lastName,emailAddress,accountsIds,accountId')
+         if '@' in ref else None)
+    if c is None and ref and '@' not in ref:
+        try:
+            c = inst.espo.call('GET', f'/Contact/{ref}')
+        except BridgeError:
+            c = None
+    if not c:
+        raise Refused(f'No contact {ref!r}: its id, or its email address.')
+    email = str(c.get('emailAddress') or '').strip().lower()
+    if not EMAIL.match(email):
+        raise Refused(f'{c.get("name")} has no email address: EspoCRM sends the sign-in link there. Add it to the contact first.')
+    accounts = list(c.get('accountsIds') or ([c['accountId']] if c.get('accountId') else []))
+    if not accounts:
+        raise Refused(f'{c.get("name")} is on no Account: a portal user sees its Account\'s records, so it would see nothing.')
+    if inst.espo.find('User', 'contactId', c['id']):
+        raise Refused(f'{c.get("name")} has a login already.')
+    # Their username is their email, as EspoCRM takes usernames (no "+": delivered-x@...)
+    username = re.sub(r'[^a-z0-9._@-]', '-', email)
+    if inst.espo.find('User', 'userName', username):
+        raise Refused(f'There is a user {username} already.')
+    p = inst.espo.find('Portal', 'name', str(portal or '').strip(), select='id,name,customId,url')
+    if not p:
+        names = [x['name'] for x in inst.espo.call('GET', '/Portal', {'select': 'name', 'maxSize': 50})['list']]
+        raise Refused(f'No portal {portal!r}. The portals: {", ".join(names) or "none"}.')
+    r = inst.espo.find('PortalRole', 'name', str(role or '').strip(), select='id,name')
+    if not r:
+        names = [x['name'] for x in inst.espo.call('GET', '/PortalRole', {'select': 'name', 'maxSize': 50})['list']]
+        raise Refused(f'No portal role {role!r}. The portal roles: {", ".join(names) or "none"}.')
+    send = email_ready(inst)
+    account_names = [(inst.espo.call('GET', f'/Account/{a}') or {}).get('name') for a in accounts]
+    facts = {'action': 'invite_portal_user', 'contact': c['id'], 'portal': p['id'], 'role': r['id']}
+    first = gate(facts, confirm, {'would_create': {
+        'portal user': username, 'email': email, 'for contact': c.get('name'), 'sees what belongs to': account_names,
+        'portal': p['name'], 'portal role': r['name']},
+        'email': f'EspoCRM emails {email} a link to set their password.' if send else
+                 "EspoCRM's outgoing email isn't set up: no email goes out, and nobody knows the password."})
+    if first:
+        return first
+    try:
+        rec = inst.espo.call('POST', '/User', body={
+            'userName': username, 'type': 'portal', 'firstName': c.get('firstName') or '', 'lastName': c.get('lastName') or c.get('name'),
+            'emailAddress': email, 'contactId': c['id'], 'accountsIds': accounts, 'portalsIds': [p['id']],
+            'portalRolesIds': [r['id']], 'isActive': True, 'sendAccessInfo': send})
+    except BridgeError as e:
+        raise failed(e) from None
+    return {'changed': True, 'portal user': username, 'contact': c.get('name'), 'portal': p['name'], 'emailed': send,
             'link': inst.link('User', rec['id'])}
 
 
