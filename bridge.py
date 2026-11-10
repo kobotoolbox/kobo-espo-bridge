@@ -95,6 +95,10 @@ submission's record (e.g. an activity's communities, one record each). A row's a
 can be named as the submission's; the submission's own answers (outside the repeat)
 are there too, for its name. Rows are matched again by the submission and the row's
 position (cKoboRow), so a retried submission updates its rows rather than adding more;
+with `match` (EspoCRM fields = a row's questions, e.g. { emailAddress = "email" }) a new
+row whose answers a record already has updates that record instead; "@record" stands for
+the submission's record, so { emailAddress = "email", cCsoId = "@record" } is "this
+person, among this CSO's contacts" (the same person in two CSOs is two contacts);
 rows that a shorter edit no longer has are removed. A submission whose record exists
 already still gets its rows (a row that failed is tried again with it).
 
@@ -1068,9 +1072,19 @@ def sync_rows(t, sub, kobo_url, uid, espo, record_id, counts):
             if body is None:
                 continue
             body.update({ROW_FIELD['espo']: n, r['link'] + 'Id': record_id})
-            if n in have:
+            same = None
+            if n not in have and r.get('match'):  # e.g. { emailAddress = "email" }: a record that has it already
+                conds = {attr: (record_id if q == '@record' else flat(psub).get(q)) for attr, q in r['match'].items()}
+                if all(v not in (None, '') for v in conds.values()):
+                    params = {'select': 'id', 'maxSize': 1}
+                    for i, (attr, v) in enumerate(conds.items()):
+                        params.update({f'where[{i}][type]': 'equals', f'where[{i}][attribute]': attr,
+                                       f'where[{i}][value]': str(v).strip().lower() if attr == 'emailAddress' else v})
+                    found = espo.call('GET', f'/{r["entity"]}', params)['list']
+                    same = found[0] if found else None
+            if n in have or same:
                 body.pop('teamsIds', None)  # the row's teams are its formula's (its record's)
-                espo.call('PUT', f'/{r["entity"]}/{have[n]}', body=body)
+                espo.call('PUT', f'/{r["entity"]}/{have.get(n) or same["id"]}', body=body)
             else:
                 espo.call('POST', f'/{r["entity"]}', body=body, headers={'X-Skip-Duplicate-Check': 'true'})
             counts['rows'] = counts.get('rows', 0) + 1

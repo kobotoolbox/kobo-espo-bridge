@@ -146,8 +146,10 @@ class Espo:
             rows = self.rows.get(entity, [])
             if params.get('where[0][type]') == 'isNull':
                 rows = [r for r in rows if not r.get('assignedUserId') and r.get('cKoboAsset')]
-            if params.get('where[0][type]') == 'equals':  # a link's lookup
-                rows = [r for r in rows if r.get(params['where[0][attribute]']) == params['where[0][value]']]
+            for i in range(4):  # a link's lookup, a repeat's match (every condition)
+                if params.get(f'where[{i}][type]') == 'equals':
+                    rows = [r for r in rows if str(r.get(params[f'where[{i}][attribute]'], '')).lower()
+                            == str(params[f'where[{i}][value]']).lower()]
             if params.get('where[0][type]') == 'in':
                 wanted = [v for k, v in params.items() if k.startswith('where[0][value]')]
                 rows = [r for r in rows if r.get(params['where[0][attribute]']) in wanted]
@@ -475,6 +477,30 @@ class Repeats(unittest.TestCase):
         data = setup.bridge_role(self.t)['data']
         self.assertEqual((data['CActivityLocation']['create'], data['CActivityLocation']['edit']), ('yes', 'all'))
         self.assertEqual(data['CAdminArea'], {**setup.NONE, 'read': 'all'})
+
+    def test_a_row_matched_to_a_record_that_has_its_answer_updates_it(self):
+        # [[repeat]] match: a row whose answer a record has already (a CSO's focal point who is
+        # a Contact already) updates that record, linked to this submission's, not a second one
+        t = {**bridge.with_form(template(ACTIVITY.replace('link = "activity"\n', 'link = "activity"\nmatch = { community = "community" }\n'),
+                                         self.tmp.name), {}), 'missing': []}
+        self.espo.rows['CActivityLocation'] = [{'id': 'old', 'community': 'JM17001', 'peopleReached': 1}]
+        bridge.handle(t, activity(1, ('JM17001', 40), ('JM08004', 25)), 'http://kf', 'aX', TEAMS, self.espo, self.counts)
+        [act] = self.espo.rows['CActivity']
+        rows = {r['id']: r for r in self.espo.rows['CActivityLocation']}
+        self.assertEqual(len(rows), 2)
+        self.assertEqual((rows['old']['activityId'], rows['old']['peopleReached'], rows['old']['cKoboRow']), (act['id'], 40, 1))
+
+    def test_a_match_on_the_record_too_keeps_other_records_rows_apart(self):
+        # { community = "community", activityId = "@record" }: the same answer on another
+        # record's row is a new row here, not that one moved
+        t = {**bridge.with_form(template(ACTIVITY.replace('link = "activity"\n',
+                                                          'link = "activity"\nmatch = { community = "community", activityId = "@record" }\n'),
+                                         self.tmp.name), {}), 'missing': []}
+        self.espo.rows['CActivityLocation'] = [{'id': 'other', 'community': 'JM17001', 'activityId': 'another-activity'}]
+        bridge.handle(t, activity(1, ('JM17001', 40)), 'http://kf', 'aX', TEAMS, self.espo, self.counts)
+        rows = {r['id']: r for r in self.espo.rows['CActivityLocation']}
+        self.assertEqual(rows['other']['activityId'], 'another-activity')
+        self.assertEqual(len(rows), 2)
 
     def test_a_repeat_needs_its_link(self):
         with self.assertRaises(ValueError):
