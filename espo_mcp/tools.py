@@ -703,8 +703,8 @@ ALWAYS = {'id', 'name', 'createdAt', 'modifiedAt'}
 
 
 def feed_scope(inst, scope):
-    """(label, code, the team the feed reads): a cluster project's own team, or a
-    response's (its coordinators': all its projects)."""
+    """(label, code, the team the feed reads): a cluster project's own team, a response's
+    (its coordinators': all its projects), or a team by its name."""
     has_project = 'CProject' in (inst.espo.call('GET', '/Metadata', {'key': 'scopes'}) or {})
     for entity, what in (('CProject', 'cluster project'), ('CResponse', 'response')):
         if entity == 'CProject' and not has_project:
@@ -721,7 +721,12 @@ def feed_scope(inst, scope):
         team_id = teams.pop()
         name = (rec.get('teamsNames') or {}).get(team_id) or team_id
         return rec['name'], rec.get('code') or rec['id'], team_id, name
-    raise Refused(f'No response or cluster project {scope!r}: list_projects.')
+    # Or a team itself, for records scoped by team rather than by a response (a country's
+    # CSOs: "CSO: Kenya"); never Kobo's own staff team
+    t = inst.espo.find('Team', 'name', str(scope or '').strip(), select='id,name')
+    if t and t['name'] != 'Internal Kobo':
+        return t['name'], re.sub(r'[^a-z0-9]+', '-', t['name'].lower()).strip('-')[:24], t['id'], t['name']
+    raise Refused(f'No response, cluster project or team {scope!r}: list_projects, list_teams.')
 
 
 def create_dashboard_feed(inst, scope, entity, fields, confirm=None):
