@@ -263,6 +263,13 @@ def build_server(inst=None, public_url=None, env=os.environ):
         """The responses, each with its cluster projects and their teams."""
         return tools.list_projects(inst)
 
+    @tool(READ)
+    def contact_list(response: Annotated[str, Field(description='The response: its code (RSP-...), name or id (list_projects).')],
+                     cluster: Annotated[str | None, Field(description='One cluster only: its sector (e.g. WASH) or its project.')] = None) -> dict:
+        """The response's contact list, by cluster: its people (coordinator, IMO...) and its partner organisations'
+        active people, with a CSV of it all. People's contact details: for the coordinators, not to publish."""
+        return tools.contact_list(inst, response, cluster)
+
     @tool(CHANGE)
     def create_response(name: Annotated[str, Field(description='e.g. "Hurricane Melissa Response".')],
                         team: Annotated[str | None, Field(description='Its coordinators\' team (made if new); '

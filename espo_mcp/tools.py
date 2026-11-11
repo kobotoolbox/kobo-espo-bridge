@@ -9,7 +9,9 @@ create_response, create_project, invite_user, invite_portal_user, add_to_team,
 remove_from_team, create_dashboard_feed, remove_dashboard_feed) takes two calls, the second with the
 `confirm` token of the first (confirm.py).
 """
+import csv
 import difflib
+import io
 import json
 import os
 import re
@@ -821,6 +823,64 @@ def create_dashboard_feed(inst, scope, entity, fields, confirm=None):
             'next': 'Ask the owner to open that page, copy the API key, and paste it into the dashboards admin '
                     f'page (EspoCRM card) with the address {inst.site_url}. Never ask for the key in the chat. Then '
                     f'kobo-mcp create_espo_feed with entity {entity} and these fields.'}
+
+
+def contact_list(inst, response, cluster=None):
+    """The response's contact list (UNDAC Handbook B, p. 54: an IM product, with the 3W): by
+    cluster, its people (coordinator, IMO, government focal point...) and its partners, the
+    organisations registered in it, with their people who are still active. People's
+    contact details: for the coordinators, to share as the response's contact list."""
+    has_entity(inst, 'CProject', 'cluster projects')
+    resp = by_name_or_id(inst, 'CResponse', response, 'response', 'list_projects')
+    meta = lambda key: inst.espo.call('GET', '/Metadata', {'key': key}) or {}  # noqa: E731
+    i18n = inst.espo.call('GET', '/I18n') or {}
+    sectors = (i18n.get('CProject', {}).get('options') or {}).get('cluster') or {}
+    roles = (i18n.get('CClusterContact', {}).get('options') or {}).get('role') or {}
+    partners_link = 'partners' in meta('entityDefs.CProject.links')
+    active = 'cActive' in meta('entityDefs.Contact.fields')
+
+    def every(entity, select, **where):
+        params = {'maxSize': 200, 'select': select, 'orderBy': 'name'}
+        for i, (attr, value) in enumerate(where.items()):
+            params.update({f'where[{i}][type]': 'equals', f'where[{i}][attribute]': attr, f'where[{i}][value]': value})
+        return inst.espo.call('GET', f'/{entity}', params)['list']
+
+    projects = every('CProject', 'name,cluster,status,leadAgencyName' + (',partnersIds,partnersNames' if partners_link else ''),
+                     responseId=resp['id'])
+    if cluster:
+        want = str(cluster).strip().casefold()
+        projects = [p for p in projects if want in ((p.get('cluster') or '').casefold(), (sectors.get(p.get('cluster')) or '').casefold(),
+                                                    p['name'].casefold())]
+        if not projects:
+            raise Refused(f'{resp["name"]} has no cluster {cluster!r}: list_projects lists its projects.')
+    people = {}
+    out, rows = [], []
+    for p in projects:
+        label = sectors.get(p.get('cluster')) or p.get('cluster') or p['name']
+        contacts = [{'role': roles.get(c.get('role')) or c.get('role'), 'name': c['name'],
+                     'organisation': c.get('accountName') or c.get('organisationOther') or c.get('organisationName'),
+                     'job title': c.get('jobTitle'), 'email': c.get('emailAddress'), 'phone': c.get('phone')}
+                    for c in every('CClusterContact', 'name,role,accountName,organisationName,organisationOther,jobTitle,emailAddress,phone',
+                                   projectId=p['id'])]
+        orgs = []
+        for acc, name in sorted((p.get('partnersNames') or {}).items(), key=lambda x: x[1] or ''):
+            if acc not in people:
+                people[acc] = [{'name': c['name'], 'job title': c.get('title'), 'email': c.get('emailAddress'),
+                                'phone': c.get('phoneNumber')}
+                               for c in every('Contact', 'name,title,emailAddress,phoneNumber' + (',cActive' if active else ''),
+                                              accountId=acc) if not active or c.get('cActive') is not False]
+            orgs.append({'organisation': name, 'people': people[acc]})
+        out.append({'cluster': label, 'project': p['name'], 'status': p.get('status'), 'lead agency': p.get('leadAgencyName'),
+                    'contacts': contacts, 'partners': orgs, 'link': inst.link('CProject', p['id'])})
+        rows += [[label, c['role'], c['name'], c['organisation'], c['job title'], c['email'], c['phone']] for c in contacts]
+        rows += [[label, 'Partner', x['name'], o['organisation'], x['job title'], x['email'], x['phone']]
+                 for o in orgs for x in o['people']]
+    text = io.StringIO()
+    w = csv.writer(text)
+    w.writerow(['Cluster', 'Role', 'Name', 'Organisation', 'Job title', 'Email', 'Phone'])
+    w.writerows([[v or '' for v in r] for r in rows])
+    return {'response': resp['name'], 'clusters': out, 'csv': text.getvalue(),
+            'note': "People's contact details: share the list with the response's coordinators and partners, not publicly."}
 
 
 def list_dashboard_feeds(inst):
