@@ -114,6 +114,7 @@ class Espo:
 
     def __init__(self):
         self.rows, self.notes, self.posts = {}, [], []
+        self.formulas = {}  # entity -> fn(row): what EspoCRM's formula would set on a new record
 
     def find(self, entity, attr, value, select=None):
         if entity == 'Team':
@@ -133,6 +134,7 @@ class Espo:
             self.posts.append((entity, body, headers))
             row = {'id': f'{entity}-{len(self.rows.get(entity, []))}', **body,
                    'createdAt': '2026-11-05 09:00:00'}
+            self.formulas.get(entity, lambda r: None)(row)
             self.rows.setdefault(entity, []).append(row)
             return row
         if method == 'PUT':
@@ -142,6 +144,8 @@ class Espo:
         if method == 'DELETE':
             self.rows[entity] = [r for r in self.rows[entity] if r['id'] != parts[1]]
             return {}
+        if method == 'GET' and len(parts) == 2:  # a record: what "@record.<link>" reads
+            return next(r for r in self.rows[entity] if r['id'] == parts[1])
         if method == 'GET' and len(parts) == 1:  # a list: escalation or a [[list]]
             rows = self.rows.get(entity, [])
             if params.get('where[0][type]') == 'isNull':
@@ -516,6 +520,26 @@ class Repeats(unittest.TestCase):
     def test_a_repeat_needs_its_link(self):
         with self.assertRaises(ValueError):
             bridge.parse_template(ACTIVITY.replace('link = "activity"\n', ''))
+
+    def test_rows_set_and_matched_on_the_records_link(self):
+        # set = { responseId = "@record.response" }, no link: each row takes the record's
+        # response (a person on an organisation's Account, not on the registration); match on
+        # it too, so the same answer under another response is a new row
+        t = {**bridge.with_form(template(ACTIVITY.replace(
+            'link = "activity"\n', 'set = { responseId = "@record.response" }\n'
+            'match = { community = "community", responseId = "@record.response" }\n'), self.tmp.name), {}), 'missing': []}
+        self.espo.formulas['CActivity'] = lambda row: row.update(responseId='r-1')  # its project's (formula)
+        self.espo.rows['CActivityLocation'] = [{'id': 'same', 'community': 'JM17001', 'responseId': 'r-1'},
+                                               {'id': 'elsewhere', 'community': 'JM08004', 'responseId': 'r-2'}]
+        bridge.handle(t, activity(1, ('JM17001', 40), ('JM08004', 25)), 'http://kf', 'aX', TEAMS, self.espo, self.counts)
+        [act] = self.espo.rows['CActivity']
+        rows = {r['id']: r for r in self.espo.rows['CActivityLocation']}
+        self.assertEqual(act.get('responseId'), 'r-1')
+        self.assertEqual((rows['same']['peopleReached'], rows['same']['responseId']), (40, 'r-1'))
+        self.assertNotIn('activityId', rows['same'])
+        new = [r for i, r in rows.items() if i not in ('same', 'elsewhere')]
+        self.assertEqual([(r['cKoboRow'], r['responseId']) for r in new], [(2, 'r-1')])  # JM08004, this response's
+        self.assertEqual(rows['elsewhere']['responseId'], 'r-2')
 
 
 class LinksAndDatetimes(unittest.TestCase):

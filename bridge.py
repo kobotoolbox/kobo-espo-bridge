@@ -100,8 +100,12 @@ position (cKoboRow), so a retried submission updates its rows rather than adding
 with `match` (EspoCRM fields = a row's questions, e.g. { emailAddress = "email" }) a new
 row whose answers a record already has updates that record instead; "@record" stands for
 the submission's record, so { emailAddress = "email", cCsoId = "@record" } is "this
-person, among this CSO's contacts" (the same person in two CSOs is two contacts);
-rows that a shorter edit no longer has are removed. A submission whose record exists
+person, among this CSO's contacts" (the same person in two CSOs is two contacts), and
+"@record.<link>" for the record's link (its formula's, read once the record is saved):
+{ emailAddress = "email", accountId = "@record.account" } is "this person, among the
+organisation's contacts". `set` writes such values on a row (set = { accountId =
+"@record.account" }), for rows that belong to what the record links to rather than to the
+record: then `link` may be left out. Rows that a shorter edit no longer has are removed. A submission whose record exists
 already still gets its rows (a row that failed is tried again with it).
 
 Lists ([[list]]): records from EspoCRM (sites, standards, partner organisations...) as a
@@ -323,8 +327,9 @@ def parse_template(text, name='template'):
         if bool(f.get('latitude')) != bool(f.get('longitude')):
             raise ValueError(f'{name}: field {f.get("kobo")}: latitude and longitude go together')
     for r in t['repeat']:
-        if not all(r.get(k) for k in ('group', 'entity', 'link')):
-            raise ValueError(f'{name}: a [[repeat]] needs group, entity and link (the field linking a row to its record)')
+        if not all(r.get(k) for k in ('group', 'entity')) or not (r.get('link') or r.get('set')):
+            raise ValueError(f'{name}: a [[repeat]] needs group, entity, and link (the field linking a row to its '
+                             'record) or set (what a row takes from it)')
         r.setdefault('field', [])
         for f in r['field']:
             if f.get('lookup') and not (f.get('type') == 'link' and f.get('entity')):
@@ -1056,6 +1061,16 @@ def sync_rows(t, sub, kobo_url, uid, espo, record_id, counts):
     """[[repeat]]: each row of the submission's repeat group as a record linked to
     record_id, made or updated by (submission, row); rows past the last one removed."""
     outer = {k: v for k, v in sub.items() if not isinstance(v, list)}
+    parent = {}
+
+    def ref(q):
+        """'@record': the record's id; '@record.<link>': its link's id (read once)."""
+        if q == '@record':
+            return record_id
+        attr = q.split('.', 1)[1] + 'Id'
+        if attr not in parent:
+            parent.update(espo.call('GET', f'/{t["record"]["entity"]}/{record_id}', {'select': attr}) or {})
+        return parent.get(attr)
     for r in t.get('repeat', []):
         rt = repeat_template(t, r)
         rows = flat(sub).get(r['group']) or []
@@ -1074,10 +1089,13 @@ def sync_rows(t, sub, kobo_url, uid, espo, record_id, counts):
                 raise BridgeError(f'{r["group"]} row {n}: {e}', status=e.status) from None
             if body is None:
                 continue
-            body.update({ROW_FIELD['espo']: n, r['link'] + 'Id': record_id})
+            body[ROW_FIELD['espo']] = n
+            if r.get('link'):
+                body[r['link'] + 'Id'] = record_id
+            body.update({attr: ref(q) for attr, q in (r.get('set') or {}).items()})
             same = None
             if n not in have and r.get('match'):  # e.g. { emailAddress = "email" }: a record that has it already
-                conds = {attr: (record_id if q == '@record' else flat(psub).get(q)) for attr, q in r['match'].items()}
+                conds = {attr: (ref(q) if str(q).startswith('@record') else flat(psub).get(q)) for attr, q in r['match'].items()}
                 if all(v not in (None, '') for v in conds.values()):
                     params = {'select': 'id', 'maxSize': 1}
                     for i, (attr, v) in enumerate(conds.items()):
