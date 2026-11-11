@@ -56,7 +56,9 @@ questions, which have no choices in the form, or to relabel).
 Any entity, not only cases ([record] entity = "Contact", "CSite", ...): a submission opens
 one record. With [record] match (an EspoCRM field = a Kobo question, e.g. the email address
 or a site code) a record that already has it is updated instead, so registering the same
-volunteer or site twice doesn't make a second one. [record] single_team keeps a record in
+volunteer or site twice doesn't make a second one; its status stays as EspoCRM has it
+(a case being worked on), unless [record] keep_on_update says otherwise (= [] for a record
+whose status is the form's to say). [record] single_team keeps a record in
 one team (the highest-priority matching route), where a submission matching several
 routes would otherwise go to all of them.
 
@@ -1016,7 +1018,8 @@ def handle(t, sub, kobo_url, uid, teams, espo, counts, kobo=None):
             same = espo.find(entity, attr, str(value).strip().lower() if attr == 'emailAddress'
                              else value, select='id,teamsIds')
     if same is not None:
-        update = {k: v for k, v in body.items() if k not in ('teamsIds', 'status')}
+        keep = t['record'].get('keep_on_update', ['status'])  # what a match doesn't overwrite
+        update = {k: v for k, v in body.items() if k != 'teamsIds' and k not in keep}
         update['teamsIds'] = sorted(set(same.get('teamsIds') or []) | set(body['teamsIds']))
         espo.call('PUT', f'/{entity}/{same["id"]}', body=update)
         espo.call('POST', '/Note', body={

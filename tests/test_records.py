@@ -243,6 +243,17 @@ class Records(unittest.TestCase):
         self.assertNotIn('description', vera)  # not a case: no description, status or priority
         self.assertNotIn('priority', vera)
 
+    def test_what_a_match_keeps_as_espocrm_has_it(self):
+        t = bridge.with_form(template(VOLUNTEER, self.tmp.name), {})
+        t['record']['keep_on_update'] = ['cSkills']  # by default ["status"]: a case's stays as staff set it
+        espo = Espo()
+        self.handle(t, sub(1, full_name='Vera Volunteer', email='vera@example.org', skills='wash'), espo)
+        self.handle(t, sub(2, full_name='Vera Volunteer', email='vera@example.org', skills='wash data'), espo)
+        self.assertEqual(espo.rows['Contact'][0]['cSkills'], ['wash'])
+        t['record']['keep_on_update'] = []
+        self.handle(t, sub(3, full_name='Vera Volunteer', email='vera@example.org', skills='data'), espo)
+        self.assertEqual(espo.rows['Contact'][0]['cSkills'], ['data'])
+
 
 class Escalation(unittest.TestCase):
     def test_unassigned_after_the_wait_mentions_the_lead_once(self):
