@@ -509,9 +509,35 @@ def create_response(inst, name, team=None, emergency_type=None, country=None, le
             'next': 'create_project for each cluster; invite_user or add_to_team for its coordinators.'}
 
 
-def create_project(inst, response, name, cluster=None, lead=None, team=None, confirm=None):
+def organisation_account(inst, ref):
+    """An organisation's Account, by the Account's name or id, or by the organisations list's
+    code or name (its Account: the one linked to it). (id or None, name, its list entry's id):
+    None when it has no Account yet (made on confirm)."""
+    ref = str(ref or '').strip()
+    if not ref:
+        raise Refused('An organisation: its name, or its code in the organisations list (e.g. ORG_UNICEF).')
+    acc = inst.espo.find('Account', 'id', ref) or inst.espo.find('Account', 'name', ref)
+    if acc:
+        return acc['id'], acc['name'], None
+    has_list = bool(inst.espo.call('GET', '/Metadata', {'key': 'entityDefs.COrganisation.fields'}))
+    org = has_list and (inst.espo.find('COrganisation', 'code', ref) or inst.espo.find('COrganisation', 'name', ref))
+    if org:
+        acc = inst.espo.find('Account', 'cOrganisationId', org['id'])
+        return (acc['id'] if acc else None), org['name'], org['id']
+    return None, ref, None  # not listed: an Account of that name (a ministry, say), made on confirm
+
+
+def make_account(inst, acc_id, name, org_id):
+    if acc_id:
+        return acc_id
+    return inst.espo.call('POST', '/Account', body={'name': name, **({'cOrganisationId': org_id} if org_id else {})})['id']
+
+
+def create_project(inst, response, name, cluster=None, lead=None, team=None, confirm=None, approach=None, lead_agency=None,
+                   co_leads=None):
     """A cluster project in a response, in a team of its own (made if it doesn't exist) and
-    the response's: its sites and tasks follow it."""
+    the response's: its sites and tasks follow it. Its lead agency and co-leads: organisations
+    (Accounts); left out, EspoCRM suggests the sector's global leads."""
     has_entity(inst, 'CProject', 'cluster projects')
     resp = by_name_or_id(inst, 'CResponse', response, 'response', 'list_projects')
     name = str(name or '').strip()
@@ -529,14 +555,23 @@ def create_project(inst, response, name, cluster=None, lead=None, team=None, con
         if code is None:
             raise Refused(f'No cluster {cluster!r}. The clusters: {", ".join(f"{lab} ({o})" for o, lab in labels.items())}.')
         cluster = code
+    if approach not in (None, '', 'cluster', 'sector'):
+        raise Refused('The approach: "cluster" (a lead agency leads) or "sector" (the government leads, the agency co-leads).')
+    leader = organisation_account(inst, lead_agency) if lead_agency else None
+    co_leads = [co_leads] if isinstance(co_leads, str) else list(co_leads or [])
+    co = [organisation_account(inst, c) for c in co_leads]
+    new = lambda o: o[1] + ('' if o[0] else ' (new)')  # noqa: E731
     team = str(team or f'Cluster: {full}').strip()[:100]
     have_team = inst.espo.find('Team', 'name', team)
     lead_user = person(inst, lead) if lead else None
     facts = {'action': 'create_project', 'response': resp['id'], 'name': full, 'cluster': cluster, 'lead': lead,
-             'team': team}
+             'team': team, 'approach': approach or 'cluster', 'lead_agency': leader and leader[1],
+             'co_leads': [c[1] for c in co]}
     first = gate(facts, confirm, {'would_create': {
         'project': full, 'response': resp['name'], 'cluster': cluster, 'lead': lead,
-        'team': team + ('' if have_team else ' (new)')},
+        'team': team + ('' if have_team else ' (new)'), 'approach': approach or 'cluster',
+        'lead_agency': new(leader) if leader else ("the sector's global lead, suggested" if cluster else None),
+        'co_leads': [new(c) for c in co] if co else ("the sector's global co-leads, suggested" if cluster and not leader else [])},
         'note': f"Its records are in its team and the response's ({', '.join(sorted((resp.get('teamsNames') or {}).values()))}): "
                 "the project's people see only this project, the response's coordinators every project. To hand "
                 "out its work, a coordinator joins its team (add_to_team)."
@@ -547,12 +582,19 @@ def create_project(inst, response, name, cluster=None, lead=None, team=None, con
         team_id = (have_team or inst.espo.call('POST', '/Team', body={'name': team}))['id']
         if lead_user:
             inst.espo.call('POST', f'/Team/{team_id}/users', body={'id': lead_user['id']})
-        rec = inst.espo.call('POST', '/CProject', body={
-            'name': full, 'responseId': resp['id'], 'status': 'Active', 'teamsIds': [team_id],
-            'leadId': lead_user and lead_user['id'], **({'cluster': cluster} if cluster else {})})
+        body = {'name': full, 'responseId': resp['id'], 'status': 'Active', 'teamsIds': [team_id],
+                'leadId': lead_user and lead_user['id'], **({'cluster': cluster} if cluster else {}),
+                **({'approach': approach} if approach else {})}
+        if leader:
+            body['leadAgencyId'] = make_account(inst, *leader)
+        if co:
+            body['coLeadsIds'] = [make_account(inst, *c) for c in co]
+        rec = inst.espo.call('POST', '/CProject', body=body)
+        rec = inst.espo.call('GET', f'/CProject/{rec["id"]}', {'select': 'leadAgencyName,coLeadsNames'})
     except BridgeError as e:
         raise failed(e) from None
     return {'changed': True, 'project': full, 'team': team, 'link': inst.link('CProject', rec['id']),
+            'lead_agency': rec.get('leadAgencyName'), 'co_leads': sorted((rec.get('coLeadsNames') or {}).values()),
             'next': f'invite_user (or add_to_team) the project\'s people into "{team}", each with a role (list_roles). '
                     'A Kobo form for its sites: a connection whose site list has `team = "' + team + '"`.'}
 

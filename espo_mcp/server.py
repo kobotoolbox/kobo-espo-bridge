@@ -93,7 +93,9 @@ the people who work on them.
    name, emergency type, country and lead). Its team is for its coordinators: they see
    every project.
 2. For each cluster, one at a time: create_project (its name, cluster and lead). Each has a
-   team of its own.
+   team of its own. Ask who leads it in the country (the lead agency, and any co-leads such
+   as a line ministry or an NGO; the sector approach when the government leads): left out,
+   the sector's global lead is suggested.
 3. The people, project by project: list_roles, then for each person invite_user with the
    project's team and a role (Cluster Lead, Cluster Partner, Cluster Viewer...), or
    add_to_team if they have an account. Ask me for their names and emails; never for
@@ -281,9 +283,16 @@ def build_server(inst=None, public_url=None, env=os.environ):
                        lead: Annotated[str | None, Field(description='Its lead: a username (list_users).')] = None,
                        team: Annotated[str | None, Field(description='Its team (made if new); default '
                                                                      '"Cluster: <project>".')] = None,
+                       approach: Annotated[str | None, Field(description='"cluster" (default: a lead agency leads) or '
+                                                                         '"sector" (the government leads, the agency co-leads).')] = None,
+                       lead_agency: Annotated[str | None, Field(description='Its lead agency: an organisation, by name or '
+                                                                            'list code (ORG_UNICEF). Left out: the sector\'s global lead.')] = None,
+                       co_leads: Annotated[list[str] | None, Field(description='Its co-leads: organisations, e.g. a '
+                                                                               'government ministry, an NGO.')] = None,
                        confirm: Confirm = None) -> dict:
-        """A cluster project in a response, with a team of its own: its people see only it. Two calls."""
-        return tools.create_project(inst, response, name, cluster, lead, team, confirm)
+        """A cluster project in a response, with a team of its own: its people see only it; its lead agency and
+        co-leads (the sector's global leads suggested when left out). Two calls."""
+        return tools.create_project(inst, response, name, cluster, lead, team, confirm, approach, lead_agency, co_leads)
 
     @tool(CHANGE)
     def invite_user(username: Annotated[str, Field(description='Lowercase, e.g. "amina.k".')],
