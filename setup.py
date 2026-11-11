@@ -88,8 +88,10 @@ def field_spec(f, have=None, labels=None):
     spec = {'type': f['type'], 'label': (f.get('labels') or {}).get(language, f['label'])}
     if f['type'] in ('enum', 'multiEnum'):
         names = [o for o in (have or []) if o] + [o for o in f['options'] if o not in (have or [])]
-        # An empty first option, so an enum can stay unanswered (it defaults to the first)
-        spec['options'] = [''] + names if f['type'] == 'enum' else names
+        # A new enum gets an empty first option, so it can stay unanswered (it defaults to the
+        # first); one EspoCRM has already keeps its choice (a pack may have said blank = false)
+        blank = have is None or '' in have
+        spec['options'] = ([''] if blank else []) + names if f['type'] == 'enum' else names
         spec['translatedOptions'] = {**{o: (labels or {}).get(o, o) for o in names}, **f['options']}
     return spec
 

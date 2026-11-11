@@ -185,6 +185,10 @@ class Choices(unittest.TestCase):
         got = setup.field_spec(f, have=['', 'zone_1', 'zone_2'], labels={'zone_1': 'Zone 1', 'zone_2': 'Old'})
         self.assertEqual(got['options'], ['', 'zone_1', 'zone_2', 'zone_5'])
         self.assertEqual(got['translatedOptions'], {'zone_1': 'Zone 1', 'zone_2': 'Zone 2', 'zone_5': 'Zone 5'})
+        # An enum without an empty option (a pack's blank = false) doesn't get one
+        got = setup.field_spec(f, have=['zone_1', 'zone_2'])
+        self.assertEqual(got['options'], ['zone_1', 'zone_2', 'zone_5'])
+        self.assertEqual(setup.field_spec(f)['options'], ['', 'zone_2', 'zone_5'])  # a new one does
 
     def test_setup_unions_the_choices_of_every_project(self):
         class TwoProjects:
