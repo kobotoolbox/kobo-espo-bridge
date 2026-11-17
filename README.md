@@ -331,3 +331,7 @@ forms the proposal matches the hand-written templates but for three naming choic
 - EspoCRM 10 no longer installs with all of `/var/www/html` on one volume (the box uses
   9.3.11): mount `data`, `custom` and `client/custom` separately
   ([docs](https://docs.espocrm.com/administration/docker/installation/#migration-to-espocrm-10)).
+
+## Licence
+
+GNU Affero General Public License v3.0: see [LICENSE](LICENSE).
